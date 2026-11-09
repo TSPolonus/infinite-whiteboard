@@ -1,0 +1,19 @@
+{
+  "name": "InfinityDraw - Nieskończona Tablica",
+  "short_name": "InfinityDraw",
+  "description": "Nieskończona tablica do rysowania z automatycznymi kształtami, wskaźnikiem laserowym i współpracą na żywo",
+  "start_url": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
