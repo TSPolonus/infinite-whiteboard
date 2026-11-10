@@ -36,7 +36,7 @@ const PEER_CONFIG = {
   },
 };
 
-const CHUNK_SIZE = 14000; // 14KB per chunk (far below the 64KB SCTP limit)
+const CHUNK_SIZE = 8000; // 8KB per chunk - perfectly safe for mobile WebRTC DataChannels
 
 export interface NetworkCallbacks {
   onElementAdd: (el: CanvasElement) => void;
@@ -204,6 +204,9 @@ export class BoardNetworkManager {
       if (!buffer) {
         buffer = { chunks: new Array(totalChunks), received: 0, total: totalChunks };
         this.chunkBuffers.set(msgId, buffer);
+        setTimeout(() => {
+          this.chunkBuffers.delete(msgId);
+        }, 15000);
       }
 
       buffer.chunks[chunkIndex] = data;
@@ -325,8 +328,8 @@ export class BoardNetworkManager {
     }
   }
 
-  // Safe chunked sender: splits large payloads into safe <12KB fragments
-  // Uses bufferedAmount check to avoid overflowing DataChannel buffer
+  // Safe chunked sender: splits large payloads into safe 8KB fragments
+  // Checks dataChannel.bufferedAmount to prevent buffer congestion on tablets/mobile
   public sendSafe(conn: DataConnection, msg: NetworkMessage) {
     if (!conn || !conn.open) return;
 
@@ -338,76 +341,78 @@ export class BoardNetworkManager {
         try {
           conn.send(msg);
         } catch (e) {
-          console.warn('sendSafe direct send error', e);
-          this.handleConnectionError(conn);
+          console.warn('sendSafe direct send warning', e);
         }
       } else {
-        // Large message: split into chunks and send with backpressure awareness
+        // Large message: split into 8KB chunks and send one by one with backpressure check
         const totalChunks = Math.ceil(jsonStr.length / CHUNK_SIZE);
         const msgId = 'm_' + Math.random().toString(36).substring(2, 9);
-        this.sendChunksWithBackpressure(conn, jsonStr, msgId, totalChunks, 0);
+        this.sendSingleChunk(conn, jsonStr, msgId, totalChunks, 0);
       }
     } catch (e) {
       console.warn('sendSafe serialization error', e);
     }
   }
 
-  private sendChunksWithBackpressure(
+  private sendSingleChunk(
     conn: DataConnection,
     jsonStr: string,
     msgId: string,
     totalChunks: number,
-    startIndex: number
+    index: number
   ) {
-    if (!conn.open) return;
+    if (!conn || !conn.open) return;
 
-    // Check DataChannel buffer (peerjs exposes underlying DataChannel via _dc)
-    const dc = (conn as any)._dc as RTCDataChannel | undefined;
+    // Check PeerJS underlying RTCDataChannel buffer
+    const dc = (conn as any).dataChannel as RTCDataChannel | undefined;
     const buffered = dc?.bufferedAmount ?? 0;
-    const MAX_BUFFER = 65536; // 64KB threshold
+    const MAX_BUFFER = 24576; // 24KB threshold for mobile devices
 
     if (buffered > MAX_BUFFER) {
-      // Buffer is full: wait for it to drain before sending more
+      // Buffer is congested: wait 30ms for buffer to clear before sending next chunk
       setTimeout(() => {
-        this.sendChunksWithBackpressure(conn, jsonStr, msgId, totalChunks, startIndex);
-      }, 20);
+        this.sendSingleChunk(conn, jsonStr, msgId, totalChunks, index);
+      }, 30);
       return;
     }
 
-    // Send next batch of chunks (up to 4 at a time)
-    const batchSize = 4;
-    let i = startIndex;
-    for (; i < Math.min(startIndex + batchSize, totalChunks); i++) {
-      if (!conn.open) return;
-      const slice = jsonStr.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-      try {
-        conn.send({
-          type: 'chunk',
-          msgId,
-          chunkIndex: i,
-          totalChunks,
-          data: slice,
-        });
-      } catch (e) {
-        console.warn('sendSafe chunk send error', e);
-        this.handleConnectionError(conn);
-        return;
-      }
+    const slice = jsonStr.substring(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE);
+    try {
+      conn.send({
+        type: 'chunk',
+        msgId,
+        chunkIndex: index,
+        totalChunks,
+        data: slice,
+      });
+    } catch (e) {
+      console.warn(`sendSafe chunk ${index}/${totalChunks} warning`, e);
+      // Do NOT kill the connection! Just stop transmitting this packet.
+      return;
     }
 
-    if (i < totalChunks) {
-      // Schedule remaining chunks
+    if (index + 1 < totalChunks) {
+      // Send next chunk with small delay so mobile network stack can dispatch packets cleanly
       setTimeout(() => {
-        this.sendChunksWithBackpressure(conn, jsonStr, msgId, totalChunks, i);
-      }, 10);
+        this.sendSingleChunk(conn, jsonStr, msgId, totalChunks, index + 1);
+      }, 12);
     }
   }
 
-  private handleConnectionError(conn: DataConnection) {
-    // Remove broken connection and notify
-    this.connections.delete(conn.peer);
-    try { conn.close(); } catch (e) {}
-    this.callbacks.onConnectionStatusChange('disconnected');
+  public ensureConnection(roomCode: string) {
+    if (!this.peer || this.peer.destroyed) {
+      this.connect(roomCode);
+      return;
+    }
+    if (this.peer.disconnected) {
+      this.peer.reconnect();
+    }
+    if (!this.isHost) {
+      const hasOpenConn = Array.from(this.connections.values()).some((c) => c.open);
+      if (!hasOpenConn) {
+        this.connect(roomCode);
+      }
+    }
   }
 
   public broadcast(msg: NetworkMessage) {

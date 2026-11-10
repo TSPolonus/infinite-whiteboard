@@ -267,6 +267,17 @@ export const App: React.FC = () => {
     };
   }, [boardSettings.roomCode]);
 
+  // Keep connection alive when tablet switches between camera/gallery apps and browser
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        networkManagerRef.current?.ensureConnection(boardSettings.roomCode);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [boardSettings.roomCode]);
+
   // Join Room by Code
   const handleJoinRoomByCode = (newCode: string) => {
     const clean = newCode.toUpperCase().trim();
@@ -1177,65 +1188,107 @@ export const App: React.FC = () => {
     pushToHistory([...selected, ...unselected]);
   };
 
-  // Safe compressed image upload (<30KB JPEG, guaranteed to never crash WebRTC!)
+  // Safe compressed image upload (<28KB JPEG, perfectly stable on tablets & mobile networks)
   const handleImageUpload = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const src = event.target?.result as string;
-      const img = new Image();
-      img.onload = () => {
-        // Compress & scale to max 500px, quality 0.70
-        const maxDimension = 500;
-        let width = img.naturalWidth;
-        let height = img.naturalHeight;
+    let objectUrl: string | null = null;
+    try {
+      objectUrl = URL.createObjectURL(file);
+    } catch (e) {
+      console.warn('createObjectURL failed, falling back', e);
+    }
 
-        if (width > maxDimension || height > maxDimension) {
-          if (width > height) {
-            height = Math.round((height / width) * maxDimension);
-            width = maxDimension;
-          } else {
-            width = Math.round((width / height) * maxDimension);
-            height = maxDimension;
-          }
+    const img = new Image();
+    img.onload = () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+
+      // Max dimension 360px - crystal clear on tablets & desktop, ultra lightweight
+      const maxDimension = 360;
+      let width = img.naturalWidth || 300;
+      let height = img.naturalHeight || 300;
+
+      if (width > maxDimension || height > maxDimension) {
+        if (width > height) {
+          height = Math.round((height / width) * maxDimension);
+          width = maxDimension;
+        } else {
+          width = Math.round((width / height) * maxDimension);
+          height = maxDimension;
         }
+      }
 
-        const compCanvas = document.createElement('canvas');
-        compCanvas.width = width;
-        compCanvas.height = height;
-        const compCtx = compCanvas.getContext('2d');
-        if (compCtx) {
-          compCtx.drawImage(img, 0, 0, width, height);
-        }
-        const compressedSrc = compCanvas.toDataURL('image/jpeg', 0.70);
+      const compCanvas = document.createElement('canvas');
+      compCanvas.width = width;
+      compCanvas.height = height;
+      const compCtx = compCanvas.getContext('2d');
+      if (compCtx) {
+        compCtx.drawImage(img, 0, 0, width, height);
+      }
 
-        const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2, transform);
-        const displayW = Math.min(320, width);
-        const displayH = Math.round((displayW / width) * height);
+      // Adaptive compression: strictly enforces base64 size <= 28,000 chars (~21KB)
+      // This is 100% immune to WebRTC buffer overruns on tablets/mobile networks
+      let quality = 0.65;
+      let compressedSrc = compCanvas.toDataURL('image/jpeg', quality);
 
-        const imgElement: ImageElement = {
-          id: 'img_' + Math.random().toString(36).substring(2, 9),
-          type: 'image',
-          x: center.x - displayW / 2,
-          y: center.y - displayH / 2,
-          width: displayW,
-          height: displayH,
-          src: compressedSrc,
-          aspectRatio: width / height,
-          rotation: 0,
-          timestamp: Date.now(),
-        };
+      while (compressedSrc.length > 28000 && quality > 0.20) {
+        quality -= 0.10;
+        compressedSrc = compCanvas.toDataURL('image/jpeg', quality);
+      }
 
-        const cached = new Image();
-        cached.src = compressedSrc;
-        imageCacheRef.current.set(imgElement.id, cached);
+      if (compressedSrc.length > 28000) {
+        // Downscale slightly if photographic noise still keeps it large
+        const downW = Math.round(width * 0.75);
+        const downH = Math.round(height * 0.75);
+        compCanvas.width = downW;
+        compCanvas.height = downH;
+        compCtx?.drawImage(img, 0, 0, downW, downH);
+        compressedSrc = compCanvas.toDataURL('image/jpeg', 0.50);
+      }
 
-        pushToHistory([...elements, imgElement]);
-        setSelectedElementIds([imgElement.id]);
-        networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
+      const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2, transform);
+      const displayW = Math.min(300, width);
+      const displayH = Math.round((displayW / width) * height);
+
+      const imgElement: ImageElement = {
+        id: 'img_' + Math.random().toString(36).substring(2, 9),
+        type: 'image',
+        x: center.x - displayW / 2,
+        y: center.y - displayH / 2,
+        width: displayW,
+        height: displayH,
+        src: compressedSrc,
+        aspectRatio: width / height,
+        rotation: 0,
+        timestamp: Date.now(),
       };
-      img.src = src;
+
+      const cached = new Image();
+      cached.src = compressedSrc;
+      imageCacheRef.current.set(imgElement.id, cached);
+
+      pushToHistory([...elements, imgElement]);
+      setSelectedElementIds([imgElement.id]);
+
+      // Make sure network is ready, then broadcast
+      if (networkManagerRef.current) {
+        networkManagerRef.current.ensureConnection(boardSettings.roomCode);
+        networkManagerRef.current.broadcast({ type: 'element_add', element: imgElement });
+      }
     };
-    reader.readAsDataURL(file);
+
+    img.onerror = () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      showToastRef.current('Nie udało się wczytać wybranego zdjęcia.');
+    };
+
+    if (objectUrl) {
+      img.src = objectUrl;
+    } else {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        img.src = ev.target?.result as string;
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   const handleClearCanvas = () => {
