@@ -615,96 +615,101 @@ export function drawImageElement(
   ctx.restore();
 }
 
-// Synchronized, Smooth, Zero-Lag Laser Beam
+// Synchronized, Smooth, Ultra-Vivid Laser Beam (Widoczny i wyrazisty u wszystkich uczestników)
 export function drawLaserTrails(
   ctx: CanvasRenderingContext2D,
   laserPoints: LaserPoint[],
   now: number
 ) {
-  if (laserPoints.length < 2) return;
+  if (laserPoints.length === 0) return;
 
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  const defaultDuration = 1500;
+  const defaultDuration = 2400;
 
-  // Pass 1: Semi-transparent outer beam
+  // Rysowanie segmentów linii
   for (let i = 1; i < laserPoints.length; i++) {
     const p1 = laserPoints[i - 1];
     const p2 = laserPoints[i];
-    // Nie rysuj segmentu jeśli p2 to początek nowego pociągnięcia (break marker)
     if (p2.break) continue;
+
     const duration = p2.duration || defaultDuration;
-    // Compute age using receivedAt if present to eliminate cross-screen clock skew!
     const age = now - (p2.receivedAt || p2.timestamp);
     if (age >= duration || age < 0) continue;
 
     const progress = 1 - age / duration;
-    const alpha = Math.pow(progress, 1.3);
+    const alpha = Math.pow(progress, 1.1);
     const laserColor = p2.color || '#f43f5e';
-    const lineWidth = Math.max(2, (p2.size || 6) * 1.5 * progress);
+    const baseSize = Math.max(4, p2.size || 8);
+    const outerWidth = baseSize * 2.6 * progress;
+    const innerWidth = Math.max(2, baseSize * 1.1 * progress);
+    const coreWidth = Math.max(1.5, baseSize * 0.5 * progress);
 
+    // Warstwa 1: Szeroka neonowa poświata (zewnętrzna aura)
     ctx.beginPath();
     ctx.strokeStyle = laserColor;
-    ctx.globalAlpha = alpha * 0.35;
-    ctx.lineWidth = lineWidth * 2.2;
+    ctx.globalAlpha = alpha * 0.45;
+    ctx.lineWidth = outerWidth;
     ctx.moveTo(p1.x, p1.y);
     ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
-  }
 
-  // Pass 2: Bright core
-  for (let i = 1; i < laserPoints.length; i++) {
-    const p1 = laserPoints[i - 1];
-    const p2 = laserPoints[i];
-    // Nie rysuj segmentu jeśli p2 to początek nowego pociągnięcia (break marker)
-    if (p2.break) continue;
-    const duration = p2.duration || defaultDuration;
-    const age = now - (p2.receivedAt || p2.timestamp);
-    if (age >= duration || age < 0) continue;
-
-    const progress = 1 - age / duration;
-    const alpha = Math.pow(progress, 1.2);
-    const laserColor = p2.color || '#f43f5e';
-    const coreWidth = Math.max(1.5, (p2.size || 6) * 0.7 * progress);
-
+    // Warstwa 2: Nasycony rdzeń koloru lasera
     ctx.beginPath();
     ctx.strokeStyle = laserColor;
-    ctx.globalAlpha = alpha * 0.9;
+    ctx.globalAlpha = alpha * 0.95;
+    ctx.lineWidth = innerWidth;
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+
+    // Warstwa 3: Biały gorący środek (dający efekt prawdziwego lasera)
+    ctx.beginPath();
+    ctx.strokeStyle = '#ffffff';
+    ctx.globalAlpha = alpha * 0.95;
     ctx.lineWidth = coreWidth;
     ctx.moveTo(p1.x, p1.y);
     ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
-
-    ctx.beginPath();
-    ctx.strokeStyle = '#ffffff';
-    ctx.globalAlpha = alpha;
-    ctx.lineWidth = Math.max(1, coreWidth * 0.45);
-    ctx.moveTo(p1.x, p1.y);
-    ctx.lineTo(p2.x, p2.y);
-    ctx.stroke();
   }
 
-  // Pulse tip
-  const last = laserPoints[laserPoints.length - 1];
-  const lastDuration = last.duration || defaultDuration;
-  const lastAge = now - (last.receivedAt || last.timestamp);
-  if (lastAge < lastDuration && lastAge >= 0) {
-    const laserColor = last.color || '#f43f5e';
-    const pulseAlpha = 1 - lastAge / lastDuration;
-    const dotSize = Math.max(3, (last.size || 6) * 0.85);
+  // Rysowanie świecących głowic / punktów (wyraźna kropka lasera)
+  for (let i = 0; i < laserPoints.length; i++) {
+    const pt = laserPoints[i];
+    // Rysuj kropkę na początku pociągnięcia lub na końcu
+    const isHead = i === laserPoints.length - 1;
+    if (!pt.break && !isHead && i % 4 !== 0) continue;
 
+    const duration = pt.duration || defaultDuration;
+    const age = now - (pt.receivedAt || pt.timestamp);
+    if (age >= duration || age < 0) continue;
+
+    const progress = 1 - age / duration;
+    const alpha = Math.pow(progress, 1.1);
+    const laserColor = pt.color || '#f43f5e';
+    const dotRadius = Math.max(3, (pt.size || 8) * (isHead ? 1.4 : 0.8) * progress);
+
+    // Poświata punktu
     ctx.beginPath();
-    ctx.arc(last.x, last.y, dotSize * 1.8, 0, Math.PI * 2);
+    ctx.arc(pt.x, pt.y, dotRadius * 2, 0, Math.PI * 2);
     ctx.fillStyle = laserColor;
-    ctx.globalAlpha = pulseAlpha * 0.5;
+    ctx.globalAlpha = alpha * 0.4;
     ctx.fill();
 
+    // Kolorowy środek
     ctx.beginPath();
-    ctx.arc(last.x, last.y, dotSize * 0.7, 0, Math.PI * 2);
+    ctx.arc(pt.x, pt.y, dotRadius, 0, Math.PI * 2);
+    ctx.fillStyle = laserColor;
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.fill();
+
+    // Biały rdzeń
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, dotRadius * 0.5, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
-    ctx.globalAlpha = pulseAlpha;
+    ctx.globalAlpha = alpha;
     ctx.fill();
   }
 

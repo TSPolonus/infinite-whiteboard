@@ -330,7 +330,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           }}
         >
           <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 600 }}>
-            Wersja: v2.5.0
+            Wersja: v2.5.1
           </span>
           <span style={{ fontSize: 11, color: '#475569' }}>
             InfinityDraw

@@ -65,14 +65,13 @@ export const App: React.FC = () => {
     pen: { color: '#0f172a', size: 3 },
     highlighter: { color: '#facc15', size: 24 },
     shape: { color: '#2563eb', size: 3 },
-    laser: { color: '#f43f5e', size: 6, duration: 1200 },
+    laser: { color: '#f43f5e', size: 8, duration: 2400 },
     eraser: { mode: 'brush', size: 28 },
   });
 
   // Canvas elements state
   const [elements, setElements] = useState<CanvasElement[]>([]);
-  const [history, setHistory] = useState<CanvasElement[][]>([]);
-  const [redoStack, setRedoStack] = useState<CanvasElement[][]>([]);
+  const [, setUndoRevision] = useState<number>(0);
 
   // Viewport transform
   const [transform, setTransform] = useState<ViewportTransform>({
@@ -134,9 +133,15 @@ export const App: React.FC = () => {
   const twoFingerMoved = useRef<boolean>(false);
   const lastTwoFingerTapTime = useRef<number>(0);
 
-  // Laser trails
+  // Laser trails & Batching (Zapobiega zatykaniu brokera MQTT)
   const laserTrailsRef = useRef<LaserPoint[]>([]);
   const lastLaserBroadcastRef = useRef<number>(0);
+  const pendingLaserBatchRef = useRef<LaserPoint[]>([]);
+  const laserBatchTimerRef = useRef<number | null>(null);
+
+  // User-scoped collaborative Undo & Redo (cofa tylko własne elementy, usuwając je u wszystkich)
+  const myUndoStackRef = useRef<string[]>([]);
+  const myRedoElementsRef = useRef<CanvasElement[]>([]);
 
   // Remote collaboration & Lobby
   const [remoteCursors, setRemoteCursors] = useState<Map<string, RemoteCursor>>(new Map());
@@ -159,42 +164,88 @@ export const App: React.FC = () => {
   const boardSettingsRef = useRef<BoardSettings>(boardSettings);
   boardSettingsRef.current = boardSettings;
 
-  // History push helper (synchronous ref update prevents missing consecutive strokes)
-  const pushToHistory = useCallback((newElements: CanvasElement[]) => {
-    setHistory((prev) => [...prev.slice(-30), elementsRef.current]);
-    setRedoStack([]);
-    elementsRef.current = newElements;
-    setElements(newElements);
+  // Rejestracja elementu stworzonego przez bieżącego użytkownika
+  const registerMyCreatedElement = useCallback((element: CanvasElement) => {
+    myUndoStackRef.current.push(element.id);
+    myRedoElementsRef.current = []; // Nowa akcja czyści stos przywracania
+    setUndoRevision((r) => r + 1);
   }, []);
 
-  // Undo / Redo
+  // History push helper (synchronous ref update prevents missing consecutive strokes)
+  const pushToHistory = useCallback((newElements: CanvasElement[]) => {
+    elementsRef.current = newElements;
+    setElements(newElements);
+    setUndoRevision((r) => r + 1);
+  }, []);
+
+  // Collaborative Undo: usuwa tylko element stworzony przez TEGO użytkownika i rozgłasza usunięcie u wszystkich
   const handleUndo = useCallback(() => {
-    if (history.length === 0) return;
-    const previous = history[history.length - 1];
-    setRedoStack((prev) => [...prev, elements]);
-    setHistory((prev) => prev.slice(0, prev.length - 1));
-    setElements(previous);
+    const myId = networkManagerRef.current?.getUserId();
+    let targetId: string | undefined;
 
+    // 1. Sprawdź stos lokalny stworzonych elementów
+    while (myUndoStackRef.current.length > 0) {
+      const candidateId = myUndoStackRef.current.pop()!;
+      if (elementsRef.current.some((e) => e.id === candidateId)) {
+        targetId = candidateId;
+        break;
+      }
+    }
+
+    // 2. Jeśli stos lokalny był pusty, znajdź od końca element oznaczony moim userId
+    if (!targetId && myId) {
+      for (let i = elementsRef.current.length - 1; i >= 0; i--) {
+        const el = elementsRef.current[i];
+        if (el.userId === myId) {
+          targetId = el.id;
+          break;
+        }
+      }
+    }
+
+    // 3. Fallback: jeśli nadal brak lub praca solo, weź ostatni element tablicy
+    if (!targetId && elementsRef.current.length > 0) {
+      targetId = elementsRef.current[elementsRef.current.length - 1].id;
+    }
+
+    if (!targetId) return;
+
+    const targetElement = elementsRef.current.find((e) => e.id === targetId);
+    if (targetElement) {
+      myRedoElementsRef.current.push(targetElement);
+    }
+
+    const updated = elementsRef.current.filter((e) => e.id !== targetId);
+    elementsRef.current = updated;
+    setElements(updated);
+    setUndoRevision((r) => r + 1);
+
+    // Rozgłoś usunięcie tego konkretnego elementu u wszystkich w pokoju
     networkManagerRef.current?.broadcast({
-      type: 'board_sync',
-      elements: previous,
-      settings: boardSettings,
+      type: 'element_delete',
+      id: targetId,
     });
-  }, [history, elements, boardSettings]);
+    showToastRef.current('↩️ Cofnięto Twój element');
+  }, []);
 
+  // Collaborative Redo: przywraca cofnięty własny element i rozgłasza do wszystkich
   const handleRedo = useCallback(() => {
-    if (redoStack.length === 0) return;
-    const next = redoStack[redoStack.length - 1];
-    setHistory((prev) => [...prev, elements]);
-    setRedoStack((prev) => prev.slice(0, prev.length - 1));
-    setElements(next);
+    if (myRedoElementsRef.current.length === 0) return;
+    const restored = myRedoElementsRef.current.pop()!;
 
+    myUndoStackRef.current.push(restored.id);
+    const updated = [...elementsRef.current.filter((e) => e.id !== restored.id), restored];
+    elementsRef.current = updated;
+    setElements(updated);
+    setUndoRevision((r) => r + 1);
+
+    // Rozgłoś dodanie przywróconego elementu u wszystkich
     networkManagerRef.current?.broadcast({
-      type: 'board_sync',
-      elements: next,
-      settings: boardSettings,
+      type: 'element_add',
+      element: restored,
     });
-  }, [redoStack, elements, boardSettings]);
+    showToastRef.current('↪️ Przywrócono element');
+  }, []);
 
   // Setup Lobby Networking
   const initNetworking = useCallback((code: string, password?: string) => {
@@ -964,18 +1015,31 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Laser pointer drag
+    // Laser pointer drag (batchowane wysyłanie co 40ms, aby nie blokować brokera MQTT)
     if (currentTool === 'laser' && isDrawing) {
       const lp: LaserPoint = {
-        x: worldPos.x,
-        y: worldPos.y,
+        x: Math.round(worldPos.x * 10) / 10,
+        y: Math.round(worldPos.y * 10) / 10,
         timestamp: Date.now(),
         color: toolSettings.laser.color,
         size: toolSettings.laser.size,
         duration: toolSettings.laser.duration,
       };
       laserTrailsRef.current.push(lp);
-      networkManagerRef.current?.broadcast({ type: 'laser_stroke', points: [lp] });
+      pendingLaserBatchRef.current.push(lp);
+
+      if (!laserBatchTimerRef.current) {
+        laserBatchTimerRef.current = window.setTimeout(() => {
+          if (pendingLaserBatchRef.current.length > 0) {
+            networkManagerRef.current?.broadcast({
+              type: 'laser_stroke',
+              points: pendingLaserBatchRef.current,
+            });
+            pendingLaserBatchRef.current = [];
+          }
+          laserBatchTimerRef.current = null;
+        }, 40);
+      }
       return;
     }
 
@@ -1153,15 +1217,32 @@ export const App: React.FC = () => {
       return;
     }
 
+    // Zakończenie pociągnięcia lasera i wypchnięcie ostatniej paczki punktów
+    if (pendingLaserBatchRef.current.length > 0) {
+      if (laserBatchTimerRef.current) {
+        clearTimeout(laserBatchTimerRef.current);
+        laserBatchTimerRef.current = null;
+      }
+      networkManagerRef.current?.broadcast({
+        type: 'laser_stroke',
+        points: pendingLaserBatchRef.current,
+      });
+      pendingLaserBatchRef.current = [];
+    }
+
     if (snappedShape) {
-      pushToHistory([...elementsRef.current.filter((e) => e.id !== snappedShape.id), snappedShape]);
-      networkManagerRef.current?.broadcast({ type: 'element_add', element: snappedShape });
+      const myId = networkManagerRef.current?.getUserId() || 'me';
+      const shapeWithUser: ShapeElement = { ...snappedShape, userId: myId };
+      registerMyCreatedElement(shapeWithUser);
+      pushToHistory([...elementsRef.current.filter((e) => e.id !== shapeWithUser.id), shapeWithUser]);
+      networkManagerRef.current?.broadcast({ type: 'element_add', element: shapeWithUser });
       setSnappedShape(null);
       setCurrentStroke([]);
       return;
     }
 
     if (currentTool === 'shape' && currentStroke.length >= 2) {
+      const myId = networkManagerRef.current?.getUserId() || 'me';
       const p0 = currentStroke[0];
       const pn = currentStroke[currentStroke.length - 1];
       const newShape: ShapeElement = {
@@ -1176,7 +1257,9 @@ export const App: React.FC = () => {
         color: toolSettings.shape.color,
         strokeWidth: toolSettings.shape.size,
         timestamp: Date.now(),
+        userId: myId,
       };
+      registerMyCreatedElement(newShape);
       pushToHistory([...elementsRef.current.filter((e) => e.id !== newShape.id), newShape]);
       networkManagerRef.current?.broadcast({ type: 'element_add', element: newShape });
       setCurrentStroke([]);
@@ -1184,6 +1267,7 @@ export const App: React.FC = () => {
     }
 
     if ((currentTool === 'pen' || currentTool === 'highlighter') && currentStroke.length > 0) {
+      const myId = networkManagerRef.current?.getUserId() || 'me';
       const activeColor = currentTool === 'pen' ? toolSettings.pen.color : toolSettings.highlighter.color;
       const activeSize = currentTool === 'pen' ? toolSettings.pen.size : toolSettings.highlighter.size;
       const newStroke: StrokeElement = {
@@ -1195,7 +1279,9 @@ export const App: React.FC = () => {
         size: activeSize,
         opacity: currentTool === 'highlighter' ? 0.40 : 1,
         timestamp: Date.now(),
+        userId: myId,
       };
+      registerMyCreatedElement(newStroke);
       pushToHistory([...elementsRef.current.filter((e) => e.id !== newStroke.id), newStroke]);
       networkManagerRef.current?.broadcast({ type: 'element_add', element: newStroke });
       setCurrentStroke([]);
@@ -1444,6 +1530,7 @@ export const App: React.FC = () => {
       const displayH = Math.round((displayW / sourceWidth) * sourceHeight);
       const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2, transform);
 
+      const myId = networkManagerRef.current?.getUserId() || 'me';
       const imgElement: ImageElement = {
         id: 'img_' + Math.random().toString(36).substring(2, 9),
         type: 'image',
@@ -1455,7 +1542,10 @@ export const App: React.FC = () => {
         aspectRatio: sourceWidth / sourceHeight,
         rotation: 0,
         timestamp: Date.now(),
+        userId: myId,
       };
+
+      registerMyCreatedElement(imgElement);
 
       // 1. Zapisz w pamięci natywny canvas z wyrenderowanym obrazem (natychmiastowe wyświetlenie na tablecie bez dekodowania base64)
       imageCacheRef.current.set(imgElement.id, hdCanvas as any);
@@ -1624,8 +1714,8 @@ export const App: React.FC = () => {
         toolSettings={toolSettings}
         autoShapeEnabled={autoShapeEnabled}
         scale={transform.scale}
-        canUndo={history.length > 0}
-        canRedo={redoStack.length > 0}
+        canUndo={myUndoStackRef.current.length > 0 || elements.some((e) => e.userId === networkManagerRef.current?.getUserId()) || elements.length > 0}
+        canRedo={myRedoElementsRef.current.length > 0}
         boardSettings={boardSettings}
         connectedCount={connectedCount}
         selectedElementId={selectedElementIds.length > 0 ? selectedElementIds[0] : null}

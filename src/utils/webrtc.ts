@@ -47,10 +47,10 @@ interface WireEnvelope {
 }
 
 // Globalne, bezpieczne brokery WebSocket WSS (port 443/8084/8884)
-// Działają w 100% pomiędzy różnymi sieciami Wi-Fi, LTE, hotspotami i za zaporami NAT
+// HiveMQ (Frankfurt EU ~46ms) jako priorytet, EMQX jako rezerwa
 const CLOUD_BROKERS = [
-  'wss://broker.emqx.io:8084/mqtt',
   'wss://broker.hivemq.com:8884/mqtt',
+  'wss://broker.emqx.io:8084/mqtt',
 ];
 
 export class BoardNetworkManager {
