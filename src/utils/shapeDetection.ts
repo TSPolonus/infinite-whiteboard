@@ -219,7 +219,8 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
   }
 
   // D) CIRCLE / ELLIPSE:
-  // Must have FEW sharp corners (< 3) and low radius variance!
+  // Compute centroid and check radius variance.
+  // A hand-drawn circle typically has circleRatio < 0.22 and few sharp corners.
   let sumX = 0, sumY = 0;
   for (const p of points) {
     sumX += p.x;
@@ -234,10 +235,15 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
     radii.reduce((acc, r) => acc + Math.abs(r - avgRadius), 0) / radii.length;
   const circleRatio = radiusVariance / avgRadius;
 
-  // Stricter circle condition (ratio < 0.14 and no 3 sharp corners)
-  if (circleRatio < 0.14 && sharpCorners.length < 3) {
+  // Also check that the path is reasonably closed (end close to start)
+  // A circle should close back on itself
+  const closedEnoughForCircle = startEndDist < Math.max(60, totalLen * 0.40);
+
+  // Liberal circle condition: ratio < 0.22, isClosed, few sharp corners
+  if (circleRatio < 0.22 && closedEnoughForCircle && sharpCorners.length < 3) {
     const aspect = width / height;
-    if (aspect >= 0.78 && aspect <= 1.28) {
+    if (aspect >= 0.65 && aspect <= 1.55) {
+      // Roughly round → circle
       const r = (width + height) / 4;
       return {
         shapeType: 'circle',
@@ -247,6 +253,7 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
         height: r * 2,
       };
     } else {
+      // Elongated → ellipse (still use 'circle' type but preserve aspect)
       return {
         shapeType: 'circle',
         x: minX,
@@ -259,7 +266,17 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
 
   // E) Fallback for closed shapes:
   if (isClosed) {
-    if (sharpCorners.length <= 3 && vCount <= 4) {
+    // If few corners and somewhat round → try circle as last resort
+    if (sharpCorners.length < 3 && circleRatio < 0.35) {
+      const r = (width + height) / 4;
+      return {
+        shapeType: 'circle',
+        x: cx - r,
+        y: cy - r,
+        width: r * 2,
+        height: r * 2,
+      };
+    } else if (sharpCorners.length <= 3 && vCount <= 4) {
       return {
         shapeType: 'triangle',
         x: minX,

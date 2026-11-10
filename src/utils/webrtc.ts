@@ -50,6 +50,7 @@ export interface NetworkCallbacks {
   onPasswordRequired: () => void;
   onPasswordError: (msg: string) => void;
   onConnectionStatusChange: (status: 'disconnected' | 'connecting' | 'connected' | 'host') => void;
+  onNetworkError?: (msg: string) => void;
 }
 
 export class BoardNetworkManager {
@@ -324,7 +325,8 @@ export class BoardNetworkManager {
     }
   }
 
-  // Safe chunked sender: splits large payloads into safe <16KB fragments
+  // Safe chunked sender: splits large payloads into safe <12KB fragments
+  // Uses bufferedAmount check to avoid overflowing DataChannel buffer
   public sendSafe(conn: DataConnection, msg: NetworkMessage) {
     if (!conn || !conn.open) return;
 
@@ -332,26 +334,80 @@ export class BoardNetworkManager {
       const jsonStr = JSON.stringify(msg);
 
       if (jsonStr.length <= CHUNK_SIZE) {
-        conn.send(msg);
+        // Small message: send directly
+        try {
+          conn.send(msg);
+        } catch (e) {
+          console.warn('sendSafe direct send error', e);
+          this.handleConnectionError(conn);
+        }
       } else {
-        // Chunking
+        // Large message: split into chunks and send with backpressure awareness
         const totalChunks = Math.ceil(jsonStr.length / CHUNK_SIZE);
         const msgId = 'm_' + Math.random().toString(36).substring(2, 9);
-
-        for (let i = 0; i < totalChunks; i++) {
-          const slice = jsonStr.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-          conn.send({
-            type: 'chunk',
-            msgId: msgId,
-            chunkIndex: i,
-            totalChunks: totalChunks,
-            data: slice,
-          });
-        }
+        this.sendChunksWithBackpressure(conn, jsonStr, msgId, totalChunks, 0);
       }
     } catch (e) {
-      console.warn('sendSafe error', e);
+      console.warn('sendSafe serialization error', e);
     }
+  }
+
+  private sendChunksWithBackpressure(
+    conn: DataConnection,
+    jsonStr: string,
+    msgId: string,
+    totalChunks: number,
+    startIndex: number
+  ) {
+    if (!conn.open) return;
+
+    // Check DataChannel buffer (peerjs exposes underlying DataChannel via _dc)
+    const dc = (conn as any)._dc as RTCDataChannel | undefined;
+    const buffered = dc?.bufferedAmount ?? 0;
+    const MAX_BUFFER = 65536; // 64KB threshold
+
+    if (buffered > MAX_BUFFER) {
+      // Buffer is full: wait for it to drain before sending more
+      setTimeout(() => {
+        this.sendChunksWithBackpressure(conn, jsonStr, msgId, totalChunks, startIndex);
+      }, 20);
+      return;
+    }
+
+    // Send next batch of chunks (up to 4 at a time)
+    const batchSize = 4;
+    let i = startIndex;
+    for (; i < Math.min(startIndex + batchSize, totalChunks); i++) {
+      if (!conn.open) return;
+      const slice = jsonStr.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+      try {
+        conn.send({
+          type: 'chunk',
+          msgId,
+          chunkIndex: i,
+          totalChunks,
+          data: slice,
+        });
+      } catch (e) {
+        console.warn('sendSafe chunk send error', e);
+        this.handleConnectionError(conn);
+        return;
+      }
+    }
+
+    if (i < totalChunks) {
+      // Schedule remaining chunks
+      setTimeout(() => {
+        this.sendChunksWithBackpressure(conn, jsonStr, msgId, totalChunks, i);
+      }, 10);
+    }
+  }
+
+  private handleConnectionError(conn: DataConnection) {
+    // Remove broken connection and notify
+    this.connections.delete(conn.peer);
+    try { conn.close(); } catch (e) {}
+    this.callbacks.onConnectionStatusChange('disconnected');
   }
 
   public broadcast(msg: NetworkMessage) {

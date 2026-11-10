@@ -95,10 +95,28 @@ export const App: React.FC = () => {
   const [currentStroke, setCurrentStroke] = useState<Point[]>([]);
   const [snappedShape, setSnappedShape] = useState<ShapeElement | null>(null);
   const [dragStart, setDragStart] = useState<Point | null>(null);
+  // Stroke initial snapshots for drag (keyed by id -> full points[])
+  const [strokeInitialPoints, setStrokeInitialPoints] = useState<Map<string, Point[]>>(new Map());
   const [elementInitialPositions, setElementInitialPositions] = useState<Map<string, Point>>(new Map());
   const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandle | null>(null);
   const [initialBBox, setInitialBBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [activeRotationAngle, setActiveRotationAngle] = useState<number | null>(null);
+
+  // Toast/notification state
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const showToastRef = useRef<(msg: string) => void>(() => {});
+
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToastMessage(null), 4500);
+  }, []);
+
+  // Keep ref always up-to-date so networking callbacks can call it without stale closure
+  useEffect(() => {
+    showToastRef.current = showToast;
+  }, [showToast]);
 
   // Tablet Auto-shape hold detection with jitter deadband
   const holdTimerRef = useRef<number | null>(null);
@@ -210,6 +228,7 @@ export const App: React.FC = () => {
             }
             return next;
           });
+          showToastRef.current('⚠️ Uczestnik rozłączył się z lobby.');
         },
         onPasswordRequired: () => {
           setIsPasswordModalOpen(true);
@@ -222,6 +241,13 @@ export const App: React.FC = () => {
         onConnectionStatusChange: (status) => {
           setConnectionStatus(status);
           setConnectedCount(netManager.getConnectedCount());
+          if (status === 'disconnected') {
+            showToastRef.current('❌ Rozłączono z lobby. Sprawdź połączenie internetowe.');
+          } else if (status === 'host') {
+            showToastRef.current('✅ Jesteś hostem lobby. Poczekaj na uczestników.');
+          } else if (status === 'connected') {
+            showToastRef.current('✅ Połączono z lobby!');
+          }
         },
       },
       () => ({
@@ -566,14 +592,19 @@ export const App: React.FC = () => {
         setDragStart(worldPos);
 
         const initPosMap = new Map<string, Point>();
+        const strokePtsMap = new Map<string, Point[]>();
         const targetIds = selectedElementIds.includes(hit.id) ? selectedElementIds : [hit.id];
         for (const id of targetIds) {
           const el = elements.find((item) => item.id === id);
           if (el) {
             initPosMap.set(id, { x: (el as any).x || 0, y: (el as any).y || 0 });
+            if (el.type === 'stroke') {
+              strokePtsMap.set(id, el.points.map(p => ({ ...p })));
+            }
           }
         }
         setElementInitialPositions(initPosMap);
+        setStrokeInitialPoints(strokePtsMap);
       } else {
         // Clicked on empty canvas: Start Marquee Area Selection!
         setSelectedElementIds([]);
@@ -759,31 +790,37 @@ export const App: React.FC = () => {
 
     // Move all selected elements
     if (currentTool === 'select' && selectedElementIds.length > 0 && dragStart && !activeResizeHandle && !isMarqueeSelecting) {
-      const dx = worldPos.x - dragStart.x;
-      const dy = worldPos.y - dragStart.y;
+      const totalDx = worldPos.x - dragStart.x;
+      const totalDy = worldPos.y - dragStart.y;
+      if (totalDx === 0 && totalDy === 0) return;
 
       setElements((prev) =>
         prev.map((el) => {
           if (!selectedElementIds.includes(el.id)) return el;
-          const initPos = elementInitialPositions.get(el.id);
-          if (!initPos) return el;
 
           if (el.type === 'shape' || el.type === 'image') {
+            // Use absolute offset from fixed dragStart → no drift
+            const initPos = elementInitialPositions.get(el.id);
+            if (!initPos) return el;
             return {
               ...el,
-              x: initPos.x + dx,
-              y: initPos.y + dy,
+              x: initPos.x + totalDx,
+              y: initPos.y + totalDy,
             };
           } else if (el.type === 'stroke') {
+            // Use absolute offset from initial snapshot of points → no drift
+            const initPoints = strokeInitialPoints.get(el.id);
+            if (!initPoints) return el;
             return {
               ...el,
-              points: el.points.map((p) => ({ x: p.x + (worldPos.x - (dragStart?.x || 0)), y: p.y + (worldPos.y - (dragStart?.y || 0)) })),
+              points: initPoints.map((p) => ({ x: p.x + totalDx, y: p.y + totalDy })),
             };
           }
           return el;
         })
       );
-      setDragStart(worldPos);
+      // NOTE: We do NOT update dragStart here — the total dx/dy from the fixed
+      // dragStart is what gives us drift-free movement on tablets.
       return;
     }
 
@@ -934,9 +971,21 @@ export const App: React.FC = () => {
 
     setDragStart(null);
     setElementInitialPositions(new Map());
+    setStrokeInitialPoints(new Map());
     setActiveResizeHandle(null);
     setInitialBBox(null);
     setActiveRotationAngle(null);
+
+    // If we were dragging selected elements, broadcast their new positions
+    if (currentTool === 'select' && selectedElementIds.length > 0) {
+      // Broadcast each selected element's updated state
+      for (const id of selectedElementIds) {
+        const updated = elements.find((e) => e.id === id);
+        if (updated) {
+          networkManagerRef.current?.broadcast({ type: 'element_update', element: updated });
+        }
+      }
+    }
 
     if (!isDrawing) return;
     setIsDrawing(false);
@@ -1401,6 +1450,33 @@ export const App: React.FC = () => {
         errorMessage={passwordErrorMessage}
         onSubmit={handlePasswordSubmit}
       />
+
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div
+          style={{
+            position: 'fixed',
+            bottom: '80px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'rgba(15, 23, 42, 0.92)',
+            color: '#f1f5f9',
+            padding: '12px 22px',
+            borderRadius: '12px',
+            fontSize: '14px',
+            fontWeight: 500,
+            boxShadow: '0 4px 24px rgba(0,0,0,0.3)',
+            zIndex: 9999,
+            pointerEvents: 'none',
+            backdropFilter: 'blur(8px)',
+            border: '1px solid rgba(255,255,255,0.1)',
+            maxWidth: '90vw',
+            textAlign: 'center',
+          }}
+        >
+          {toastMessage}
+        </div>
+      )}
     </div>
   );
 };
