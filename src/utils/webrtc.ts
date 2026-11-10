@@ -31,6 +31,7 @@ const PEER_CONFIG = {
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
     ],
   },
 };
@@ -58,6 +59,7 @@ export class BoardNetworkManager {
   private callbacks: NetworkCallbacks;
   private currentBoardProvider: () => { elements: CanvasElement[]; settings: BoardSettings };
   private roomCode: string = '';
+  private heartbeatTimer: number | null = null;
 
   constructor(
     callbacks: NetworkCallbacks,
@@ -100,8 +102,9 @@ export class BoardNetworkManager {
         this.isHost = false;
         this.connections.set(hostPeerId, conn);
         this.callbacks.onConnectionStatusChange('connected');
+        this.startHeartbeat();
 
-        conn.send({
+        this.safeSend(conn, {
           type: 'join',
           userId: this.myUserId,
           userName: this.myUserName,
@@ -110,7 +113,7 @@ export class BoardNetworkManager {
       });
 
       conn.on('data', (data) => {
-        this.handleMessage(data as NetworkMessage);
+        this.handleMessage(data as NetworkMessage, conn);
       });
 
       conn.on('close', () => {
@@ -118,16 +121,18 @@ export class BoardNetworkManager {
         this.callbacks.onPeerLeave(hostPeerId);
       });
 
-      // If cannot connect to host within 3s, become host
+      conn.on('error', (err) => {
+        console.warn('Guest connection warning', err);
+      });
+
       setTimeout(() => {
         if (!connectedToHost && this.peer === clientPeer) {
           this.initAsHost(cleanCode);
         }
-      }, 3000);
+      }, 3500);
     });
 
     clientPeer.on('error', (err) => {
-      // If host peer is not available, become the host!
       if (err.type === 'peer-unavailable') {
         this.initAsHost(cleanCode);
       }
@@ -148,21 +153,27 @@ export class BoardNetworkManager {
 
     hostPeer.on('open', () => {
       this.callbacks.onConnectionStatusChange('host');
+      this.startHeartbeat();
     });
 
     hostPeer.on('connection', (conn) => {
       conn.on('open', () => {
-        // Ready for join request
+        // Connected
       });
 
       conn.on('data', async (data) => {
         const msg = data as NetworkMessage;
+        if (msg.type === 'ping') {
+          this.safeSend(conn, { type: 'pong' });
+          return;
+        }
+
         if (msg.type === 'join') {
           const { settings, elements } = this.currentBoardProvider();
 
           if (settings.isPasswordProtected && settings.passwordHash) {
             if (!msg.password) {
-              conn.send({
+              this.safeSend(conn, {
                 type: 'join_ack',
                 success: false,
                 error: 'PASSWORD_REQUIRED',
@@ -172,7 +183,7 @@ export class BoardNetworkManager {
 
             const inputHash = await hashPassword(msg.password);
             if (inputHash !== settings.passwordHash) {
-              conn.send({
+              this.safeSend(conn, {
                 type: 'join_ack',
                 success: false,
                 error: 'INVALID_PASSWORD',
@@ -184,13 +195,13 @@ export class BoardNetworkManager {
           this.connections.set(conn.peer, conn);
           this.callbacks.onPeerJoin(conn.peer, msg.userName);
 
-          conn.send({
+          this.safeSend(conn, {
             type: 'join_ack',
             success: true,
             board: { elements, settings },
           });
         } else {
-          this.handleMessage(msg);
+          this.handleMessage(msg, conn);
           this.broadcastExcept(msg, conn.peer);
         }
       });
@@ -199,6 +210,10 @@ export class BoardNetworkManager {
         this.connections.delete(conn.peer);
         this.callbacks.onPeerLeave(conn.peer);
       });
+
+      conn.on('error', (err) => {
+        console.warn('Host connection warning', err);
+      });
     });
 
     hostPeer.on('error', (err) => {
@@ -206,7 +221,22 @@ export class BoardNetworkManager {
     });
   }
 
-  private handleMessage(msg: NetworkMessage) {
+  private startHeartbeat() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = window.setInterval(() => {
+      this.broadcast({ type: 'ping' });
+    }, 6000);
+  }
+
+  private handleMessage(msg: NetworkMessage, conn?: DataConnection) {
+    if (msg.type === 'ping') {
+      if (conn) this.safeSend(conn, { type: 'pong' });
+      return;
+    }
+    if (msg.type === 'pong') {
+      return;
+    }
+
     switch (msg.type) {
       case 'join_ack': {
         if (!msg.success) {
@@ -253,18 +283,26 @@ export class BoardNetworkManager {
     }
   }
 
-  public broadcast(msg: NetworkMessage) {
-    for (const [, conn] of this.connections) {
-      if (conn.open) {
+  public safeSend(conn: DataConnection, msg: NetworkMessage) {
+    try {
+      if (conn && conn.open) {
         conn.send(msg);
       }
+    } catch (e) {
+      console.warn('DataChannel send error', e);
+    }
+  }
+
+  public broadcast(msg: NetworkMessage) {
+    for (const [, conn] of this.connections) {
+      this.safeSend(conn, msg);
     }
   }
 
   private broadcastExcept(msg: NetworkMessage, excludePeerId: string) {
     for (const [peerId, conn] of this.connections) {
-      if (peerId !== excludePeerId && conn.open) {
-        conn.send(msg);
+      if (peerId !== excludePeerId) {
+        this.safeSend(conn, msg);
       }
     }
   }
@@ -274,6 +312,11 @@ export class BoardNetworkManager {
   }
 
   public disconnect() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+
     for (const [, conn] of this.connections) {
       try {
         conn.close();

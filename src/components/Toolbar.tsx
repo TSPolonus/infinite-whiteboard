@@ -29,8 +29,8 @@ import {
   Lock,
   Globe,
   Wand2,
-  Scissors,
   Check,
+  Paintbrush,
 } from 'lucide-react';
 import type { Tool, ShapeType, BoardSettings, ToolSettings } from '../types';
 
@@ -67,23 +67,23 @@ interface ToolbarProps {
 }
 
 const PEN_COLORS = [
-  '#0f172a', // Ciemny (idealny na białą tablicę)
-  '#2563eb', // Niebieski
-  '#dc2626', // Czerwony
-  '#16a34a', // Zielony
-  '#9333ea', // Fioletowy
-  '#ea580c', // Pomarańczowy
-  '#ffffff', // Biały
-  '#38bdf8', // Neon błękit
+  '#0f172a',
+  '#2563eb',
+  '#dc2626',
+  '#16a34a',
+  '#9333ea',
+  '#ea580c',
+  '#ffffff',
+  '#38bdf8',
 ];
 
 const HIGHLIGHTER_COLORS = [
-  '#facc15', // Neon Żółty (klasyczny)
-  '#4ade80', // Neon Zielony
-  '#38bdf8', // Neon Błękit
-  '#f43f5e', // Neon Róż
-  '#c084fc', // Neon Fiolet
-  '#fb923c', // Neon Pomarańcz
+  '#facc15',
+  '#4ade80',
+  '#38bdf8',
+  '#f43f5e',
+  '#c084fc',
+  '#fb923c',
 ];
 
 const LASER_COLORS = [
@@ -91,6 +91,13 @@ const LASER_COLORS = [
   { name: 'Błękitny', value: '#38bdf8' },
   { name: 'Zielony', value: '#22c55e' },
   { name: 'Fioletowy', value: '#c084fc' },
+];
+
+const LASER_DURATIONS = [
+  { label: '0.6s', value: 600 },
+  { label: '1.2s', value: 1200 },
+  { label: '2.0s', value: 2000 },
+  { label: '3.5s', value: 3500 },
 ];
 
 const SHAPES_LIST: { type: ShapeType; label: string; icon: React.ReactNode }[] = [
@@ -143,11 +150,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
   const handleToolClick = (tool: Tool) => {
     if (currentTool === tool) {
-      // Tapping the already active tool toggles its specific sub-menu
       setShowSubMenu(showSubMenu === tool ? null : tool);
     } else {
       onToolChange(tool);
-      // Automatically show settings popover for customizable tools
       if (['pen', 'highlighter', 'shape', 'eraser', 'laser'].includes(tool)) {
         setShowSubMenu(tool);
       } else {
@@ -180,7 +185,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           gap: 6,
         }}
       >
-        {/* Left: App Logo & Lobby Info */}
         <div
           className="glass-panel"
           style={{
@@ -247,14 +251,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </div>
         </div>
 
-        {/* Center: Tablet Palm Rejection Indicator Button */}
         <button
           className={`glass-panel glass-btn ${boardSettings.palmRejection ? 'active' : ''}`}
           onClick={onTogglePalmRejection}
           title={
             boardSettings.palmRejection
               ? 'Ochrona przed dłonią: WŁĄCZONA (Tylko rysik rysuje, dłoń przesuwa)'
-              : 'Ochrona przed dłonią: WYŁĄCZONA (Dotyk i rysik rysują)'
+              : 'Ochrona przed dłonią: WYŁĄCZONA'
           }
           style={{
             pointerEvents: 'auto',
@@ -274,7 +277,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </span>
         </button>
 
-        {/* Right: Actions */}
         <div
           className="glass-panel"
           style={{
@@ -290,7 +292,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           <button
             className="glass-btn"
             onClick={onOpenShareModal}
-            title="Zaproś do lobby (kod, link)"
+            title="Lobby i kod pokoju"
             style={{
               padding: '6px 11px',
               gap: 5,
@@ -324,7 +326,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </div>
       </header>
 
-      {/* Floating Selection Controls (when an object is selected) */}
+      {/* Floating Selection Controls */}
       {selectedElementId && (
         <div
           className="glass-panel"
@@ -344,12 +346,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           }}
         >
           <span style={{ fontSize: 12, color: '#38bdf8', fontWeight: 600, marginRight: 4 }}>
-            Wybrany obiekt:
+            Obiekt:
           </span>
           <button
             className="glass-btn"
             onClick={onRotateSelected}
-            title="Obróć o 90°"
+            title="Obróć o 90° (lub przeciągnij niebieski punkt u góry, by obrócić o dowolny kąt)"
             style={{ padding: '6px 10px', fontSize: 12, gap: 5 }}
           >
             🔄 <span>Obróć 90°</span>
@@ -404,8 +406,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           maxWidth: '96vw',
         }}
       >
-        {/* Specific Popover according to current tool */}
-
         {/* 1. PEN SETTINGS POPOVER */}
         {showSubMenu === 'pen' && currentTool === 'pen' && (
           <div
@@ -413,7 +413,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 10,
+              gap: 12,
               padding: '8px 14px',
               borderRadius: 16,
               boxShadow: '0 8px 30px rgba(0, 0, 0, 0.5)',
@@ -467,31 +467,42 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
             <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.15)' }} />
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 11, color: '#94a3b8' }}>Grubość:</span>
+            {/* Pretty Slider + Live Preview Circle */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input
                 type="range"
                 min="1"
                 max="36"
+                className="pretty-slider"
                 value={toolSettings.pen.size}
                 onChange={(e) => onUpdateToolSetting('pen', { size: Number(e.target.value) })}
-                style={{ width: 65, cursor: 'pointer', accentColor: '#38bdf8' }}
+                style={{ width: 75 }}
               />
-              <span style={{ fontSize: 11, color: '#f8fafc', minWidth: 24 }}>
+              <div
+                style={{
+                  width: Math.min(22, Math.max(4, toolSettings.pen.size)),
+                  height: Math.min(22, Math.max(4, toolSettings.pen.size)),
+                  borderRadius: '50%',
+                  backgroundColor: toolSettings.pen.color,
+                  boxShadow: `0 0 6px ${toolSettings.pen.color}`,
+                }}
+                title={`Grubość: ${toolSettings.pen.size}px`}
+              />
+              <span style={{ fontSize: 11, color: '#f8fafc', minWidth: 20 }}>
                 {toolSettings.pen.size}px
               </span>
             </div>
           </div>
         )}
 
-        {/* 2. HIGHLIGHTER SETTINGS POPOVER */}
+        {/* 2. HIGHLIGHTER SETTINGS POPOVER (Okrągły) */}
         {showSubMenu === 'highlighter' && currentTool === 'highlighter' && (
           <div
             className="glass-panel"
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 10,
+              gap: 12,
               padding: '8px 14px',
               borderRadius: 16,
               boxShadow: '0 8px 30px rgba(0, 0, 0, 0.5)',
@@ -499,7 +510,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               justifyContent: 'center',
             }}
           >
-            <span style={{ fontSize: 11, color: '#facc15', fontWeight: 700 }}>Zakreślacz:</span>
+            <span style={{ fontSize: 11, color: '#facc15', fontWeight: 700 }}>Zakreślacz (okrągły):</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               {HIGHLIGHTER_COLORS.map((c) => (
                 <button
@@ -522,81 +533,121 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
             <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.15)' }} />
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 11, color: '#94a3b8' }}>Szerokość:</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input
                 type="range"
                 min="8"
                 max="60"
+                className="pretty-slider"
                 value={toolSettings.highlighter.size}
                 onChange={(e) => onUpdateToolSetting('highlighter', { size: Number(e.target.value) })}
-                style={{ width: 65, cursor: 'pointer', accentColor: '#facc15' }}
+                style={{ width: 75 }}
               />
-              <span style={{ fontSize: 11, color: '#f8fafc', minWidth: 24 }}>
+              <div
+                style={{
+                  width: Math.min(24, Math.max(8, toolSettings.highlighter.size / 2)),
+                  height: Math.min(24, Math.max(8, toolSettings.highlighter.size / 2)),
+                  borderRadius: '50%',
+                  backgroundColor: toolSettings.highlighter.color,
+                  opacity: 0.6,
+                }}
+              />
+              <span style={{ fontSize: 11, color: '#f8fafc', minWidth: 20 }}>
                 {toolSettings.highlighter.size}px
               </span>
             </div>
           </div>
         )}
 
-        {/* 3. ERASER SETTINGS POPOVER (Tryb + wielkość wprost na pasku) */}
+        {/* 3. ERASER SETTINGS POPOVER (Pędzel wycierający + suwak grubości) */}
         {showSubMenu === 'eraser' && currentTool === 'eraser' && (
           <div
             className="glass-panel"
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 10,
+              gap: 12,
               padding: '8px 14px',
               borderRadius: 16,
               boxShadow: '0 8px 30px rgba(0, 0, 0, 0.5)',
+              flexWrap: 'wrap',
+              justifyContent: 'center',
             }}
           >
             <span style={{ fontSize: 11, color: '#38bdf8', fontWeight: 700 }}>Gumka:</span>
             <button
-              className={`glass-btn ${toolSettings.eraser.mode === 'stroke' ? 'active' : ''}`}
-              onClick={() => onUpdateToolSetting('eraser', { mode: 'stroke' })}
-              style={{ padding: '6px 10px', fontSize: 12, gap: 6 }}
+              className={`glass-btn ${toolSettings.eraser.mode === 'brush' ? 'active' : ''}`}
+              onClick={() => onUpdateToolSetting('eraser', { mode: 'brush' })}
+              style={{ padding: '5px 9px', fontSize: 11, gap: 5 }}
             >
-              <Eraser size={14} />
-              <span>Całe linie</span>
-              {toolSettings.eraser.mode === 'stroke' && <Check size={13} />}
+              <Paintbrush size={13} />
+              <span>Pędzel wycierający</span>
+              {toolSettings.eraser.mode === 'brush' && <Check size={12} />}
             </button>
             <button
-              className={`glass-btn ${toolSettings.eraser.mode === 'pixel' ? 'active' : ''}`}
-              onClick={() => onUpdateToolSetting('eraser', { mode: 'pixel' })}
-              style={{ padding: '6px 10px', fontSize: 12, gap: 6 }}
+              className={`glass-btn ${toolSettings.eraser.mode === 'stroke' ? 'active' : ''}`}
+              onClick={() => onUpdateToolSetting('eraser', { mode: 'stroke' })}
+              style={{ padding: '5px 9px', fontSize: 11, gap: 5 }}
             >
-              <Scissors size={14} />
-              <span>Piksele / Wycinanie</span>
-              {toolSettings.eraser.mode === 'pixel' && <Check size={13} />}
+              <Eraser size={13} />
+              <span>Całe linie</span>
+              {toolSettings.eraser.mode === 'stroke' && <Check size={12} />}
             </button>
+
+            <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.15)' }} />
+
+            {/* Eraser Width Slider & Preview Circle */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="range"
+                min="8"
+                max="80"
+                className="pretty-slider"
+                value={toolSettings.eraser.size}
+                onChange={(e) => onUpdateToolSetting('eraser', { size: Number(e.target.value) })}
+                style={{ width: 75 }}
+              />
+              <div
+                style={{
+                  width: Math.min(22, Math.max(6, toolSettings.eraser.size / 3)),
+                  height: Math.min(22, Math.max(6, toolSettings.eraser.size / 3)),
+                  borderRadius: '50%',
+                  border: '2px dashed #38bdf8',
+                  background: 'rgba(56, 189, 248, 0.2)',
+                }}
+              />
+              <span style={{ fontSize: 11, color: '#f8fafc', minWidth: 20 }}>
+                {toolSettings.eraser.size}px
+              </span>
+            </div>
           </div>
         )}
 
-        {/* 4. LASER SETTINGS POPOVER (Kolor + wielkość wprost na pasku) */}
+        {/* 4. LASER SETTINGS POPOVER (Kolor + Długość pojawiania się + Lekki i gładki) */}
         {showSubMenu === 'laser' && currentTool === 'laser' && (
           <div
             className="glass-panel"
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 10,
+              gap: 12,
               padding: '8px 14px',
               borderRadius: 16,
               boxShadow: '0 8px 30px rgba(0, 0, 0, 0.5)',
+              flexWrap: 'wrap',
+              justifyContent: 'center',
             }}
           >
-            <span style={{ fontSize: 11, color: '#f43f5e', fontWeight: 700 }}>Laser:</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 11, color: toolSettings.laser.color, fontWeight: 700 }}>Laser:</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
               {LASER_COLORS.map((lc) => (
                 <button
                   key={lc.value}
                   onClick={() => onUpdateToolSetting('laser', { color: lc.value })}
                   style={{
-                    padding: '4px 8px',
-                    borderRadius: 8,
-                    backgroundColor: 'rgba(15, 23, 42, 0.6)',
+                    padding: '3px 7px',
+                    borderRadius: 7,
+                    backgroundColor: 'rgba(15, 23, 42, 0.7)',
                     border: toolSettings.laser.color === lc.value ? `2px solid ${lc.value}` : '1px solid rgba(255,255,255,0.15)',
                     color: lc.value,
                     fontSize: 11,
@@ -604,13 +655,32 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                     cursor: 'pointer',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 4,
+                    gap: 3,
                   }}
                 >
-                  <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: lc.value }} />
+                  <div style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: lc.value }} />
                   <span>{lc.name}</span>
                 </button>
               ))}
+            </div>
+
+            <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.15)' }} />
+
+            {/* Długość pojawiania się lasera */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 11, color: '#94a3b8' }}>Czas zanikania:</span>
+              <div style={{ display: 'flex', gap: 4 }}>
+                {LASER_DURATIONS.map((dur) => (
+                  <button
+                    key={dur.value}
+                    onClick={() => onUpdateToolSetting('laser', { duration: dur.value })}
+                    className={`glass-btn ${toolSettings.laser.duration === dur.value ? 'active' : ''}`}
+                    style={{ padding: '2px 7px', fontSize: 10, fontWeight: 600 }}
+                  >
+                    {dur.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}
@@ -642,7 +712,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               ))}
             </div>
 
-            {/* Shape color & stroke size */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 8 }}>
               <span style={{ fontSize: 11, color: '#94a3b8' }}>Kolor:</span>
               <div style={{ display: 'flex', gap: 5 }}>
@@ -666,9 +735,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 type="range"
                 min="1"
                 max="24"
+                className="pretty-slider"
                 value={toolSettings.shape.size}
                 onChange={(e) => onUpdateToolSetting('shape', { size: Number(e.target.value) })}
-                style={{ width: 60, cursor: 'pointer', accentColor: '#38bdf8' }}
+                style={{ width: 60 }}
               />
             </div>
           </div>
@@ -688,17 +758,15 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             WebkitOverflowScrolling: 'touch',
           }}
         >
-          {/* Select / Move / Scale */}
           <button
             className={`glass-btn ${currentTool === 'select' ? 'active' : ''}`}
             onClick={() => handleToolClick('select')}
-            title="Zaznaczanie, skalowanie i przesuwanie obiektów"
+            title="Zaznaczanie, skalowanie i obracanie"
             style={{ width: 38, height: 38 }}
           >
             <MousePointer size={18} />
           </button>
 
-          {/* Hand / Pan */}
           <button
             className={`glass-btn ${currentTool === 'hand' ? 'active' : ''}`}
             onClick={() => handleToolClick('hand')}
@@ -710,11 +778,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
           <div style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.15)' }} />
 
-          {/* Pen Tool */}
           <button
             className={`glass-btn ${currentTool === 'pen' ? 'active' : ''}`}
             onClick={() => handleToolClick('pen')}
-            title="Długopis (kliknij ponownie, aby zmienić kolor/grubość)"
+            title="Długopis"
             style={{ width: 38, height: 38, position: 'relative' }}
           >
             <Pen size={18} />
@@ -732,11 +799,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             />
           </button>
 
-          {/* Highlighter Tool */}
           <button
             className={`glass-btn ${currentTool === 'highlighter' ? 'active' : ''}`}
             onClick={() => handleToolClick('highlighter')}
-            title="Zakreślacz (kliknij ponownie, aby zmienić kolor/grubość)"
+            title="Zakreślacz (okrągły)"
             style={{ width: 38, height: 38, position: 'relative' }}
           >
             <Highlighter size={18} />
@@ -754,14 +820,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             />
           </button>
 
-          {/* Eraser Tool */}
           <button
             className={`glass-btn ${currentTool === 'eraser' ? 'active' : ''}`}
             onClick={() => handleToolClick('eraser')}
-            title={`Gumka: ${toolSettings.eraser.mode === 'stroke' ? 'Całe linie' : 'Piksele'} (kliknij ponownie, aby zmienić tryb)`}
+            title="Gumka"
             style={{ width: 38, height: 38, position: 'relative' }}
           >
-            {toolSettings.eraser.mode === 'pixel' ? <Scissors size={18} /> : <Eraser size={18} />}
+            {toolSettings.eraser.mode === 'brush' ? <Paintbrush size={18} /> : <Eraser size={18} />}
             <span
               style={{
                 position: 'absolute',
@@ -772,15 +837,14 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 color: '#38bdf8',
               }}
             >
-              {toolSettings.eraser.mode === 'pixel' ? 'px' : 'obj'}
+              {toolSettings.eraser.mode === 'brush' ? 'px' : 'obj'}
             </span>
           </button>
 
-          {/* Laser Pointer */}
           <button
             className={`glass-btn ${currentTool === 'laser' ? 'active laser-active-glow' : ''}`}
             onClick={() => handleToolClick('laser')}
-            title="Wskaźnik laserowy (kliknij ponownie, aby zmienić kolor)"
+            title="Płynny wskaźnik laserowy"
             style={{
               width: 38,
               height: 38,
@@ -790,11 +854,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             <Sparkles size={18} />
           </button>
 
-          {/* Shapes Tool */}
           <button
             className={`glass-btn ${currentTool === 'shape' ? 'active' : ''}`}
             onClick={() => handleToolClick('shape')}
-            title="Kształty geometryczne"
+            title="Kształty"
             style={{ width: 38, height: 38 }}
           >
             {currentShape === 'rectangle' && <Square size={18} />}
@@ -810,11 +873,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             {currentShape === 'double_arrow' && <ArrowLeftRight size={18} />}
           </button>
 
-          {/* Add Image */}
           <button
             className="glass-btn"
             onClick={() => fileInputRef.current?.click()}
-            title="Wstaw zdjęcie (z galerii / aparatu / pliku)"
+            title="Wstaw zdjęcie"
             style={{ width: 38, height: 38 }}
           >
             <ImageIcon size={18} />
@@ -829,7 +891,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
           <div style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.15)' }} />
 
-          {/* Auto Shape Snap Toggle */}
           <button
             className={`glass-btn ${autoShapeEnabled ? 'active' : ''}`}
             onClick={onToggleAutoShape}
@@ -849,12 +910,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
           <div style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.15)' }} />
 
-          {/* Undo / Redo */}
           <button
             className="glass-btn"
             onClick={onUndo}
             disabled={!canUndo}
-            title="Cofnij (Ctrl+Z)"
+            title="Cofnij"
             style={{ width: 36, height: 36, opacity: canUndo ? 1 : 0.35 }}
           >
             <Undo2 size={17} />
@@ -864,7 +924,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             className="glass-btn"
             onClick={onRedo}
             disabled={!canRedo}
-            title="Ponów (Ctrl+Y)"
+            title="Ponów"
             style={{ width: 36, height: 36, opacity: canRedo ? 1 : 0.35 }}
           >
             <Redo2 size={17} />

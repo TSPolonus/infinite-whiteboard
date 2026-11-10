@@ -38,7 +38,7 @@ import { PasswordPromptModal } from './components/PasswordPromptModal';
 export const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Initialize room code (from hash or generate 6-char code)
+  // Initialize room code
   const [boardSettings, setBoardSettings] = useState<BoardSettings>(() => {
     const hash = window.location.hash.replace('#room=', '').toUpperCase();
     const code = hash && hash.length >= 3 ? hash : generateRoomCode();
@@ -62,8 +62,8 @@ export const App: React.FC = () => {
     pen: { color: '#0f172a', size: 3 },
     highlighter: { color: '#facc15', size: 24 },
     shape: { color: '#2563eb', size: 3 },
-    laser: { color: '#f43f5e', size: 10 },
-    eraser: { mode: 'stroke', size: 24 },
+    laser: { color: '#f43f5e', size: 6, duration: 1200 },
+    eraser: { mode: 'brush', size: 28 },
   });
 
   // Canvas elements state
@@ -92,6 +92,7 @@ export const App: React.FC = () => {
   const [elementInitialPos, setElementInitialPos] = useState<Point | null>(null);
   const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandle | null>(null);
   const [initialBBox, setInitialBBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [activeRotationAngle, setActiveRotationAngle] = useState<number | null>(null);
 
   // Tablet Auto-shape hold detection with jitter deadband
   const holdTimerRef = useRef<number | null>(null);
@@ -398,15 +399,29 @@ export const App: React.FC = () => {
             points: currentStroke,
             color: activeColor,
             size: activeSize,
-            opacity: currentTool === 'highlighter' ? 0.45 : 1,
+            opacity: currentTool === 'highlighter' ? 0.40 : 1,
             timestamp: now,
           };
           drawStroke(ctx, tempStroke);
+        } else if (currentTool === 'eraser' && toolSettings.eraser.mode === 'brush') {
+          // Live drawing eraser preview stroke
+          const lastP = currentStroke[currentStroke.length - 1];
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(lastP.x, lastP.y, toolSettings.eraser.size, 0, Math.PI * 2);
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 1.5 / transform.scale;
+          ctx.setLineDash([3 / transform.scale, 3 / transform.scale]);
+          ctx.stroke();
+          ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
+          ctx.fill();
+          ctx.restore();
         }
       }
 
       // 3. Laser trails
-      laserTrailsRef.current = laserTrailsRef.current.filter((p) => now - p.timestamp < 1600);
+      const maxLaserLifetime = toolSettings.laser.duration || 1500;
+      laserTrailsRef.current = laserTrailsRef.current.filter((p) => now - p.timestamp < (p.duration || maxLaserLifetime));
       drawLaserTrails(ctx, laserTrailsRef.current, now);
 
       // 4. Selection box & handles
@@ -448,7 +463,9 @@ export const App: React.FC = () => {
 
   // Pointer Down Handler
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    try {
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    } catch (err) {}
 
     const { screenPos, worldPos } = getCanvasPoint(e);
     activePointers.current.set(e.pointerId, screenPos);
@@ -485,7 +502,7 @@ export const App: React.FC = () => {
       return;
     }
 
-    // 5. Select Tool: Check resize handles first, then element hit
+    // 5. Select Tool: Check resize/rotation handles first, then element hit
     if (currentTool === 'select') {
       if (selectedElementId) {
         const selected = elements.find((el) => el.id === selectedElementId);
@@ -520,7 +537,7 @@ export const App: React.FC = () => {
       return;
     }
 
-    // 6. Eraser Tool: object vs pixel erase
+    // 6. Eraser Tool: object vs brush erase
     if (currentTool === 'eraser') {
       if (toolSettings.eraser.mode === 'stroke') {
         const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
@@ -530,6 +547,8 @@ export const App: React.FC = () => {
           networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
         }
       } else {
+        setIsDrawing(true);
+        setCurrentStroke([worldPos]);
         applyPixelEraser(worldPos);
       }
       return;
@@ -544,6 +563,7 @@ export const App: React.FC = () => {
         timestamp: Date.now(),
         color: toolSettings.laser.color,
         size: toolSettings.laser.size,
+        duration: toolSettings.laser.duration,
       };
       laserTrailsRef.current.push(lp);
       networkManagerRef.current?.broadcast({ type: 'laser_stroke', points: [lp] });
@@ -561,7 +581,7 @@ export const App: React.FC = () => {
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
       holdTimerRef.current = window.setTimeout(() => {
         triggerAutoShapeSnap();
-      }, 420);
+      }, 400);
     }
   };
 
@@ -628,7 +648,7 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Rescaling selected element via handle
+    // Rescaling / Free Rotating selected element
     if (currentTool === 'select' && selectedElementId && activeResizeHandle && dragStart && initialBBox) {
       const dx = worldPos.x - dragStart.x;
       const dy = worldPos.y - dragStart.y;
@@ -637,12 +657,15 @@ export const App: React.FC = () => {
         prev.map((el) => {
           if (el.id !== selectedElementId) return el;
 
+          // Free rotation by ANY angle!
           if (activeResizeHandle === 'rotate') {
             const cx = initialBBox.x + initialBBox.width / 2;
             const cy = initialBBox.y + initialBBox.height / 2;
             const rad = Math.atan2(worldPos.y - cy, worldPos.x - cx);
-            const deg = (rad * 180) / Math.PI + 90;
-            return { ...el, rotation: Math.round(deg) };
+            let deg = Math.round((rad * 180) / Math.PI + 90);
+            if (deg < 0) deg += 360;
+            setActiveRotationAngle(deg);
+            return { ...el, rotation: deg };
           }
 
           if (el.type === 'shape' || el.type === 'image') {
@@ -702,8 +725,8 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Eraser on drag
-    if (currentTool === 'eraser' && (e.buttons === 1 || e.pointerType === 'pen')) {
+    // Eraser on drag (Brush Mode)
+    if (currentTool === 'eraser' && (e.buttons === 1 || e.pointerType === 'pen' || isDrawing)) {
       if (toolSettings.eraser.mode === 'stroke') {
         const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
         if (hit) {
@@ -712,6 +735,7 @@ export const App: React.FC = () => {
           networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
         }
       } else {
+        setCurrentStroke((prev) => [...prev, worldPos]);
         applyPixelEraser(worldPos);
       }
       return;
@@ -725,6 +749,7 @@ export const App: React.FC = () => {
         timestamp: Date.now(),
         color: toolSettings.laser.color,
         size: toolSettings.laser.size,
+        duration: toolSettings.laser.duration,
       };
       laserTrailsRef.current.push(lp);
       networkManagerRef.current?.broadcast({ type: 'laser_stroke', points: [lp] });
@@ -735,18 +760,16 @@ export const App: React.FC = () => {
     if (isDrawing) {
       setCurrentStroke((prev) => [...prev, worldPos]);
 
-      // Tablet-safe auto-shape hold detection:
-      // Only reset timer if movement is SIGNIFICANT (> 14px).
-      // If stylus is holding still or has micro-tremor, DO NOT reset the timer!
+      // Tablet-friendly Auto-shape hold detection:
       if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
         if (lastAnchorRef.current) {
           const distFromAnchor = Math.hypot(worldPos.x - lastAnchorRef.current.x, worldPos.y - lastAnchorRef.current.y);
-          if (distFromAnchor > 14) {
+          if (distFromAnchor > 16) {
             lastAnchorRef.current = worldPos;
             if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
             holdTimerRef.current = window.setTimeout(() => {
               triggerAutoShapeSnap();
-            }, 420);
+            }, 400);
           }
         } else {
           lastAnchorRef.current = worldPos;
@@ -755,7 +778,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Pixel Eraser logic
+  // Brush Eraser logic (Continuous vector path trimming)
   const applyPixelEraser = (erasePoint: Point) => {
     const eraserRadius = toolSettings.eraser.size;
     let changed = false;
@@ -780,7 +803,7 @@ export const App: React.FC = () => {
     }
 
     if (changed) {
-      pushToHistory(nextElements);
+      setElements(nextElements);
     }
   };
 
@@ -806,9 +829,11 @@ export const App: React.FC = () => {
           timestamp: Date.now(),
         };
         setSnappedShape(shapeEl);
-        if (typeof navigator !== 'undefined' && navigator.vibrate) {
-          navigator.vibrate(35);
-        }
+        try {
+          if (typeof navigator !== 'undefined' && navigator.vibrate) {
+            navigator.vibrate(35);
+          }
+        } catch (e) {}
       }
       return latestPoints;
     });
@@ -816,6 +841,10 @@ export const App: React.FC = () => {
 
   // Pointer Up Handler
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    try {
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch (err) {}
+
     activePointers.current.delete(e.pointerId);
     if (activePointers.current.size < 2) {
       initialPinchDist.current = null;
@@ -837,9 +866,21 @@ export const App: React.FC = () => {
     setElementInitialPos(null);
     setActiveResizeHandle(null);
     setInitialBBox(null);
+    setActiveRotationAngle(null);
 
     if (!isDrawing) return;
     setIsDrawing(false);
+
+    if (currentTool === 'eraser') {
+      setCurrentStroke([]);
+      pushToHistory(elements);
+      networkManagerRef.current?.broadcast({
+        type: 'board_sync',
+        elements: elements,
+        settings: boardSettings,
+      });
+      return;
+    }
 
     if (snappedShape) {
       pushToHistory([...elements, snappedShape]);
@@ -881,7 +922,7 @@ export const App: React.FC = () => {
         points: currentStroke,
         color: activeColor,
         size: activeSize,
-        opacity: currentTool === 'highlighter' ? 0.45 : 1,
+        opacity: currentTool === 'highlighter' ? 0.40 : 1,
         timestamp: Date.now(),
       };
       pushToHistory([...elements, newStroke]);
@@ -890,7 +931,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // PC Wheel Zoom (Directly zoom via scroll towards mouse cursor!)
+  // PC Wheel Zoom (Towards mouse cursor)
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
@@ -941,7 +982,7 @@ export const App: React.FC = () => {
     });
   };
 
-  // Selected Element Transformation Handlers
+  // Transformation actions
   const handleDuplicateSelected = () => {
     if (!selectedElementId) return;
     const target = elements.find((el) => el.id === selectedElementId);
@@ -1014,40 +1055,58 @@ export const App: React.FC = () => {
     pushToHistory(next);
   };
 
+  // Image insertion with automatic compression to keep WebRTC fast & reliable!
   const handleImageUpload = (file: File) => {
     const reader = new FileReader();
     reader.onload = (event) => {
       const src = event.target?.result as string;
       const img = new Image();
       img.onload = () => {
-        const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2, transform);
-        const maxDim = 400;
-        let w = img.naturalWidth;
-        let h = img.naturalHeight;
-        if (w > maxDim || h > maxDim) {
-          if (w > h) {
-            h = (h / w) * maxDim;
-            w = maxDim;
+        // Compress & scale to max 800px for instant WebRTC sync
+        const maxDimension = 800;
+        let width = img.naturalWidth;
+        let height = img.naturalHeight;
+
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) {
+            height = Math.round((height / width) * maxDimension);
+            width = maxDimension;
           } else {
-            w = (w / h) * maxDim;
-            h = maxDim;
+            width = Math.round((width / height) * maxDimension);
+            height = maxDimension;
           }
         }
+
+        const compCanvas = document.createElement('canvas');
+        compCanvas.width = width;
+        compCanvas.height = height;
+        const compCtx = compCanvas.getContext('2d');
+        if (compCtx) {
+          compCtx.drawImage(img, 0, 0, width, height);
+        }
+        const compressedSrc = compCanvas.toDataURL('image/jpeg', 0.82);
+
+        const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2, transform);
+        const displayW = Math.min(360, width);
+        const displayH = Math.round((displayW / width) * height);
 
         const imgElement: ImageElement = {
           id: 'img_' + Math.random().toString(36).substring(2, 9),
           type: 'image',
-          x: center.x - w / 2,
-          y: center.y - h / 2,
-          width: w,
-          height: h,
-          src: src,
-          aspectRatio: img.naturalWidth / img.naturalHeight,
+          x: center.x - displayW / 2,
+          y: center.y - displayH / 2,
+          width: displayW,
+          height: displayH,
+          src: compressedSrc,
+          aspectRatio: width / height,
           rotation: 0,
           timestamp: Date.now(),
         };
 
-        imageCacheRef.current.set(imgElement.id, img);
+        const cached = new Image();
+        cached.src = compressedSrc;
+        imageCacheRef.current.set(imgElement.id, cached);
+
         pushToHistory([...elements, imgElement]);
         setSelectedElementId(imgElement.id);
         networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
@@ -1149,7 +1208,7 @@ export const App: React.FC = () => {
   return (
     <div
       onContextMenu={(e) => e.preventDefault()}
-      style={{ position: 'relative', width: '100vw', height: '100vh', overflow: 'hidden' }}
+      style={{ position: 'relative', width: '100vw', height: '100dvh', overflow: 'hidden' }}
     >
       <canvas
         ref={canvasRef}
@@ -1171,11 +1230,32 @@ export const App: React.FC = () => {
               : currentTool === 'laser'
               ? 'crosshair'
               : currentTool === 'eraser'
-              ? 'cell'
+              ? 'crosshair'
               : 'crosshair',
           touchAction: 'none',
         }}
       />
+
+      {/* Rotation Angle Tooltip */}
+      {activeRotationAngle !== null && (
+        <div
+          className="glass-panel"
+          style={{
+            position: 'absolute',
+            top: 20,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            padding: '6px 14px',
+            borderRadius: 12,
+            fontSize: 14,
+            fontWeight: 700,
+            color: '#38bdf8',
+            zIndex: 50,
+          }}
+        >
+          Kąt obrotu: {activeRotationAngle}°
+        </div>
+      )}
 
       <Toolbar
         currentTool={currentTool}

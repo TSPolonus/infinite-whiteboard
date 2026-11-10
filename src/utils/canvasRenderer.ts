@@ -39,15 +39,15 @@ export function drawGrid(
   height: number,
   transform: ViewportTransform,
   gridType: 'dots' | 'lines' | 'none',
-  gridSize: number = 40,
-  isDark: boolean = true
+  gridSize: number = 32,
+  isDark: boolean = false
 ) {
   if (gridType === 'none') return;
 
   ctx.save();
   const scaledGrid = gridSize * transform.scale;
 
-  if (scaledGrid < 12) {
+  if (scaledGrid < 10) {
     ctx.restore();
     return;
   }
@@ -58,9 +58,9 @@ export function drawGrid(
   const color = isDark
     ? gridType === 'dots'
       ? 'rgba(255, 255, 255, 0.15)'
-      : 'rgba(255, 255, 255, 0.07)'
+      : 'rgba(255, 255, 255, 0.08)'
     : gridType === 'dots'
-    ? 'rgba(0, 0, 0, 0.15)'
+    ? 'rgba(0, 0, 0, 0.12)'
     : 'rgba(0, 0, 0, 0.07)';
 
   ctx.fillStyle = color;
@@ -99,14 +99,13 @@ export function drawStroke(
   if (stroke.points.length === 0) return;
 
   ctx.save();
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';   // Always round caps!
+  ctx.lineJoin = 'round';  // Always round joints!
   ctx.strokeStyle = stroke.color;
 
   if (stroke.tool === 'highlighter') {
-    ctx.globalAlpha = stroke.opacity || 0.45;
-    ctx.lineWidth = stroke.size * 2.2;
-    ctx.lineCap = 'square';
+    ctx.globalAlpha = stroke.opacity || 0.40;
+    ctx.lineWidth = stroke.size * 1.6;
   } else {
     ctx.globalAlpha = stroke.opacity || 1.0;
     ctx.lineWidth = stroke.size;
@@ -122,7 +121,6 @@ export function drawStroke(
     return;
   }
 
-  // Draw smooth curve with pressure sensitivity if available
   ctx.beginPath();
   ctx.moveTo(points[0].x, points[0].y);
 
@@ -154,7 +152,6 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
 
   const { x, y, width, height, shapeType, rotation = 0 } = shape;
 
-  // Apply rotation around center if present
   if (rotation !== 0) {
     const cx = x + width / 2;
     const cy = y + height / 2;
@@ -247,11 +244,7 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
     case 'heart': {
       const topCurveHeight = height * 0.3;
       ctx.moveTo(x + width / 2, y + topCurveHeight);
-      ctx.bezierCurveTo(
-        x + width / 2, y,
-        x, y,
-        x, y + topCurveHeight
-      );
+      ctx.bezierCurveTo(x + width / 2, y, x, y, x, y + topCurveHeight);
       ctx.bezierCurveTo(
         x, y + (height + topCurveHeight) / 2,
         x + width / 2, y + (height + topCurveHeight) / 1.5,
@@ -262,11 +255,7 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
         x + width, y + (height + topCurveHeight) / 2,
         x + width, y + topCurveHeight
       );
-      ctx.bezierCurveTo(
-        x + width, y,
-        x + width / 2, y,
-        x + width / 2, y + topCurveHeight
-      );
+      ctx.bezierCurveTo(x + width, y, x + width / 2, y, x + width / 2, y + topCurveHeight);
       ctx.closePath();
       if (shape.fillColor) ctx.fill();
       ctx.stroke();
@@ -338,7 +327,6 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
       const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
       const headLen = Math.max(14, shape.strokeWidth * 3.5);
 
-      // End arrow
       ctx.beginPath();
       ctx.moveTo(p2.x, p2.y);
       ctx.lineTo(
@@ -350,7 +338,6 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
         p2.x - headLen * Math.cos(angle + Math.PI / 6),
         p2.y - headLen * Math.sin(angle + Math.PI / 6)
       );
-      // Start arrow
       ctx.moveTo(p1.x, p1.y);
       ctx.lineTo(
         p1.x + headLen * Math.cos(angle - Math.PI / 6),
@@ -394,9 +381,9 @@ export function drawImageElement(
   if (img.complete && img.naturalWidth > 0) {
     ctx.drawImage(img, imgElem.x, imgElem.y, imgElem.width, imgElem.height);
   } else {
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
+    ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
     ctx.strokeRect(imgElem.x, imgElem.y, imgElem.width, imgElem.height);
     ctx.fillRect(imgElem.x, imgElem.y, imgElem.width, imgElem.height);
@@ -404,56 +391,68 @@ export function drawImageElement(
   ctx.restore();
 }
 
+// Optimized, Smooth, Fast Laser Beam (Zero lag on tablets!)
 export function drawLaserTrails(
   ctx: CanvasRenderingContext2D,
   laserPoints: LaserPoint[],
   now: number
 ) {
-  if (laserPoints.length === 0) return;
-
-  const MAX_AGE = 1600; // ms trail lifetime
+  if (laserPoints.length < 2) return;
 
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
+  const defaultDuration = 1500;
+
+  // Pass 1: Smooth outer translucent halo
   for (let i = 1; i < laserPoints.length; i++) {
     const p1 = laserPoints[i - 1];
     const p2 = laserPoints[i];
+    const duration = p2.duration || defaultDuration;
     const age = now - p2.timestamp;
-    if (age >= MAX_AGE) continue;
+    if (age >= duration) continue;
 
-    const progress = 1 - age / MAX_AGE;
-    const alpha = Math.pow(progress, 1.4);
+    const progress = 1 - age / duration;
+    const alpha = Math.pow(progress, 1.3);
     const laserColor = p2.color || '#f43f5e';
+    const lineWidth = Math.max(2, (p2.size || 8) * 1.6 * progress);
 
-    // 1. Wide ambient glowing halo
     ctx.beginPath();
     ctx.strokeStyle = laserColor;
-    ctx.globalAlpha = alpha * 0.3;
-    ctx.lineWidth = p2.size * 3.8 * progress;
-    ctx.shadowColor = laserColor;
-    ctx.shadowBlur = 18;
+    ctx.globalAlpha = alpha * 0.4;
+    ctx.lineWidth = lineWidth * 2.2;
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+  }
+
+  // Pass 2: Bright inner core
+  for (let i = 1; i < laserPoints.length; i++) {
+    const p1 = laserPoints[i - 1];
+    const p2 = laserPoints[i];
+    const duration = p2.duration || defaultDuration;
+    const age = now - p2.timestamp;
+    if (age >= duration) continue;
+
+    const progress = 1 - age / duration;
+    const alpha = Math.pow(progress, 1.2);
+    const laserColor = p2.color || '#f43f5e';
+    const coreWidth = Math.max(1.5, (p2.size || 8) * 0.65 * progress);
+
+    ctx.beginPath();
+    ctx.strokeStyle = laserColor;
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.lineWidth = coreWidth;
     ctx.moveTo(p1.x, p1.y);
     ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
 
-    // 2. Saturated mid-glow
-    ctx.beginPath();
-    ctx.strokeStyle = laserColor;
-    ctx.globalAlpha = alpha * 0.8;
-    ctx.lineWidth = p2.size * 1.8 * progress;
-    ctx.shadowBlur = 8;
-    ctx.moveTo(p1.x, p1.y);
-    ctx.lineTo(p2.x, p2.y);
-    ctx.stroke();
-
-    // 3. Ultra-bright white core
+    // Center white laser reflection
     ctx.beginPath();
     ctx.strokeStyle = '#ffffff';
     ctx.globalAlpha = alpha;
-    ctx.lineWidth = Math.max(2, p2.size * 0.6 * progress);
-    ctx.shadowBlur = 0;
+    ctx.lineWidth = Math.max(1, coreWidth * 0.4);
     ctx.moveTo(p1.x, p1.y);
     ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
@@ -461,24 +460,23 @@ export function drawLaserTrails(
 
   // Draw glowing pulse dot at the tip
   const last = laserPoints[laserPoints.length - 1];
+  const lastDuration = last.duration || defaultDuration;
   const lastAge = now - last.timestamp;
-  if (lastAge < MAX_AGE) {
+  if (lastAge < lastDuration) {
     const laserColor = last.color || '#f43f5e';
-    const pulseAlpha = 1 - lastAge / MAX_AGE;
+    const pulseAlpha = 1 - lastAge / lastDuration;
+    const dotSize = Math.max(3, (last.size || 8) * 0.8);
 
     ctx.beginPath();
-    ctx.arc(last.x, last.y, last.size * 2, 0, Math.PI * 2);
+    ctx.arc(last.x, last.y, dotSize * 1.8, 0, Math.PI * 2);
     ctx.fillStyle = laserColor;
-    ctx.globalAlpha = pulseAlpha * 0.7;
-    ctx.shadowColor = laserColor;
-    ctx.shadowBlur = 20;
+    ctx.globalAlpha = pulseAlpha * 0.5;
     ctx.fill();
 
     ctx.beginPath();
-    ctx.arc(last.x, last.y, last.size * 0.8, 0, Math.PI * 2);
+    ctx.arc(last.x, last.y, dotSize * 0.7, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
     ctx.globalAlpha = pulseAlpha;
-    ctx.shadowBlur = 0;
     ctx.fill();
   }
 
@@ -498,8 +496,18 @@ export function drawSelectionBox(
   const y = bbox.minY - pad;
   const w = bbox.maxX - bbox.minX + pad * 2;
   const h = bbox.maxY - bbox.minY + pad * 2;
+  const rotation = (element as any).rotation || 0;
 
   ctx.save();
+
+  if (rotation !== 0) {
+    const cx = bbox.minX + (bbox.maxX - bbox.minX) / 2;
+    const cy = bbox.minY + (bbox.maxY - bbox.minY) / 2;
+    ctx.translate(cx, cy);
+    ctx.rotate((rotation * Math.PI) / 180);
+    ctx.translate(-cx, -cy);
+  }
+
   ctx.strokeStyle = '#38bdf8';
   ctx.lineWidth = 1.5 / transform.scale;
   ctx.setLineDash([4 / transform.scale, 4 / transform.scale]);
@@ -513,14 +521,14 @@ export function drawSelectionBox(
   ctx.lineWidth = 2 / transform.scale;
 
   const handles = [
-    { x: x, y: y },                 // tl
-    { x: x + w / 2, y: y },         // t
-    { x: x + w, y: y },             // tr
-    { x: x + w, y: y + h / 2 },     // r
-    { x: x + w, y: y + h },         // br
-    { x: x + w / 2, y: y + h },     // b
-    { x: x, y: y + h },             // bl
-    { x: x, y: y + h / 2 },         // l
+    { x: x, y: y },
+    { x: x + w / 2, y: y },
+    { x: x + w, y: y },
+    { x: x + w, y: y + h / 2 },
+    { x: x + w, y: y + h },
+    { x: x + w / 2, y: y + h },
+    { x: x, y: y + h },
+    { x: x, y: y + h / 2 },
   ];
 
   for (const hPos of handles) {
@@ -528,7 +536,7 @@ export function drawSelectionBox(
     ctx.strokeRect(hPos.x - handleSize / 2, hPos.y - handleSize / 2, handleSize, handleSize);
   }
 
-  // Rotation Handle at top
+  // Rotation Handle (top)
   const rotDist = 26 / transform.scale;
   const rotX = x + w / 2;
   const rotY = y - rotDist;
@@ -541,7 +549,7 @@ export function drawSelectionBox(
 
   ctx.setLineDash([]);
   ctx.beginPath();
-  ctx.arc(rotX, rotY, handleSize * 0.65, 0, Math.PI * 2);
+  ctx.arc(rotX, rotY, handleSize * 0.7, 0, Math.PI * 2);
   ctx.fillStyle = '#38bdf8';
   ctx.fill();
   ctx.stroke();
@@ -562,13 +570,30 @@ export function getHandleAtPoint(
   const y = bbox.minY - pad;
   const w = bbox.maxX - bbox.minX + pad * 2;
   const h = bbox.maxY - bbox.minY + pad * 2;
-  const threshold = 14 / transform.scale;
+  const threshold = 16 / transform.scale;
 
-  // Rotation handle check
+  // Un-rotate point if element is rotated
+  let testPos = worldPos;
+  const rotation = (element as any).rotation || 0;
+  if (rotation !== 0) {
+    const cx = bbox.minX + (bbox.maxX - bbox.minX) / 2;
+    const cy = bbox.minY + (bbox.maxY - bbox.minY) / 2;
+    const rad = (-rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const dx = worldPos.x - cx;
+    const dy = worldPos.y - cy;
+    testPos = {
+      x: cx + dx * cos - dy * sin,
+      y: cy + dx * sin + dy * cos,
+    };
+  }
+
+  // Check rotation handle
   const rotDist = 26 / transform.scale;
   const rotX = x + w / 2;
   const rotY = y - rotDist;
-  if (Math.hypot(worldPos.x - rotX, worldPos.y - rotY) <= threshold) {
+  if (Math.hypot(testPos.x - rotX, testPos.y - rotY) <= threshold) {
     return 'rotate';
   }
 
@@ -585,7 +610,7 @@ export function getHandleAtPoint(
   ];
 
   for (const hPos of handles) {
-    if (Math.hypot(worldPos.x - hPos.x, worldPos.y - hPos.y) <= threshold) {
+    if (Math.hypot(testPos.x - hPos.x, testPos.y - hPos.y) <= threshold) {
       return hPos.handle;
     }
   }
@@ -665,7 +690,7 @@ export function getElementBBox(element: CanvasElement): {
 export function isPointInsideElement(point: Point, element: CanvasElement): boolean {
   const bbox = getElementBBox(element);
   if (!bbox) return false;
-  const margin = 12;
+  const margin = 14;
   if (
     point.x < bbox.minX - margin ||
     point.x > bbox.maxX + margin ||
@@ -699,7 +724,7 @@ function distToSegment(p: Point, a: Point, b: Point): number {
   return Math.hypot(p.x - (a.x + t * (b.x - a.x)), p.y - (a.y + t * (b.y - a.y)));
 }
 
-// Pixel / Segment Eraser helper
+// Continuous Freehand Brush Eraser (interpolates trajectory and smoothly cuts strokes)
 export function eraseStrokePixels(
   stroke: StrokeElement,
   erasePoint: Point,

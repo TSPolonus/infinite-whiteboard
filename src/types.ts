@@ -13,7 +13,7 @@ export type ShapeType =
   | 'heart'
   | 'speech_bubble';
 
-export type EraserMode = 'stroke' | 'pixel';
+export type EraserMode = 'stroke' | 'brush'; // 'stroke' (całe linie) or 'brush' (pędzel wycierający)
 
 export interface Point {
   x: number;
@@ -78,6 +78,7 @@ export interface LaserPoint {
   timestamp: number;
   color: string;
   size: number;
+  duration?: number;
   userId?: string;
 }
 
@@ -94,7 +95,7 @@ export interface ToolSettings {
   pen: { color: string; size: number };
   highlighter: { color: string; size: number };
   shape: { color: string; size: number };
-  laser: { color: string; size: number };
+  laser: { color: string; size: number; duration: number }; // duration in ms (500 to 4000)
   eraser: { mode: EraserMode; size: number };
 }
 
@@ -111,6 +112,8 @@ export interface BoardSettings {
 }
 
 export type NetworkMessage =
+  | { type: 'ping' }
+  | { type: 'pong' }
   | { type: 'join'; userId: string; userName: string; password?: string }
   | { type: 'join_ack'; success: boolean; error?: string; board?: { elements: CanvasElement[]; settings: BoardSettings } }
   | { type: 'element_add'; element: CanvasElement }
