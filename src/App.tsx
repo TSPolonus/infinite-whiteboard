@@ -73,7 +73,7 @@ export const App: React.FC = () => {
 
   // Canvas elements state
   const [elements, setElements] = useState<CanvasElement[]>([]);
-  const [, setUndoRevision] = useState<number>(0);
+  const [undoRevision, setUndoRevision] = useState<number>(0);
 
   // Viewport transform
   const [transform, setTransform] = useState<ViewportTransform>({
@@ -141,9 +141,22 @@ export const App: React.FC = () => {
   const pendingLaserBatchRef = useRef<LaserPoint[]>([]);
   const laserBatchTimerRef = useRef<number | null>(null);
 
-  // User-scoped collaborative Undo & Redo (cofa tylko własne elementy, usuwając je u wszystkich)
-  const myUndoStackRef = useRef<string[]>([]);
-  const myRedoElementsRef = useRef<CanvasElement[]>([]);
+  // User-scoped collaborative Undo & Redo działające na WSZYSTKIE akcje (rysowanie, kształty, ruch, rozmiar, obrót, usuwanie, warstwy, czyszczenie)
+  type HistoryAction =
+    | { type: 'add'; element: CanvasElement }
+    | { type: 'delete'; elements: CanvasElement[] }
+    | { type: 'modify'; before: CanvasElement[]; after: CanvasElement[] }
+    | { type: 'clear'; previousElements: CanvasElement[] };
+
+  const undoStackRef = useRef<HistoryAction[]>([]);
+  const redoStackRef = useRef<HistoryAction[]>([]);
+  const draggedInitialElementsRef = useRef<CanvasElement[]>([]);
+  const resizedInitialElementsRef = useRef<CanvasElement[]>([]);
+
+  // Interaktywna modyfikacja dopasowanego kształtu podczas trzymania rysowania
+  const isAdjustingSnappedShapeRef = useRef<boolean>(false);
+  const snappedInitialShapeRef = useRef<ShapeElement | null>(null);
+  const snapStartPointerRef = useRef<Point | null>(null);
 
   // Remote collaboration & Lobby
   const [remoteCursors, setRemoteCursors] = useState<Map<string, RemoteCursor>>(new Map());
@@ -166,12 +179,17 @@ export const App: React.FC = () => {
   const boardSettingsRef = useRef<BoardSettings>(boardSettings);
   boardSettingsRef.current = boardSettings;
 
-  // Rejestracja elementu stworzonego przez bieżącego użytkownika
-  const registerMyCreatedElement = useCallback((element: CanvasElement) => {
-    myUndoStackRef.current.push(element.id);
-    myRedoElementsRef.current = []; // Nowa akcja czyści stos przywracania
+  // Dodanie akcji na stos Undo
+  const pushUndoAction = useCallback((action: HistoryAction) => {
+    undoStackRef.current.push(action);
+    redoStackRef.current = []; // Nowa akcja czyści stos Redo
     setUndoRevision((r) => r + 1);
   }, []);
+
+  // Rejestracja elementu stworzonego przez bieżącego użytkownika
+  const registerMyCreatedElement = useCallback((element: CanvasElement) => {
+    pushUndoAction({ type: 'add', element });
+  }, [pushUndoAction]);
 
   // History push helper (synchronous ref update prevents missing consecutive strokes)
   const pushToHistory = useCallback((newElements: CanvasElement[]) => {
@@ -180,73 +198,125 @@ export const App: React.FC = () => {
     setUndoRevision((r) => r + 1);
   }, []);
 
-  // Collaborative Undo: usuwa tylko element stworzony przez TEGO użytkownika i rozgłasza usunięcie u wszystkich
+  // Wszechstronne Collaborative Undo: cofa rysowanie, przesuwanie, zmianę rozmiaru, usuwanie, obrót itp.
   const handleUndo = useCallback(() => {
-    const myId = networkManagerRef.current?.getUserId();
-    let targetId: string | undefined;
+    if (undoStackRef.current.length === 0) {
+      if (elementsRef.current.length > 0) {
+        const last = elementsRef.current[elementsRef.current.length - 1];
+        const updated = elementsRef.current.filter((e) => e.id !== last.id);
+        elementsRef.current = updated;
+        setElements(updated);
+        networkManagerRef.current?.broadcast({ type: 'element_delete', id: last.id });
+        redoStackRef.current.push({ type: 'add', element: last });
+        setUndoRevision((r) => r + 1);
+        showToastRef.current('↩️ Cofnięto narysowanie');
+      }
+      return;
+    }
 
-    // 1. Sprawdź stos lokalny stworzonych elementów
-    while (myUndoStackRef.current.length > 0) {
-      const candidateId = myUndoStackRef.current.pop()!;
-      if (elementsRef.current.some((e) => e.id === candidateId)) {
-        targetId = candidateId;
+    const action = undoStackRef.current.pop()!;
+    redoStackRef.current.push(action);
+
+    switch (action.type) {
+      case 'add': {
+        const targetId = action.element.id;
+        const updated = elementsRef.current.filter((e) => e.id !== targetId);
+        elementsRef.current = updated;
+        setElements(updated);
+        networkManagerRef.current?.broadcast({ type: 'element_delete', id: targetId });
+        showToastRef.current('↩️ Cofnięto narysowanie');
+        break;
+      }
+      case 'delete': {
+        const restoredIds = new Set(action.elements.map((e) => e.id));
+        const updated = [...elementsRef.current.filter((e) => !restoredIds.has(e.id)), ...action.elements];
+        elementsRef.current = updated;
+        setElements(updated);
+        for (const el of action.elements) {
+          networkManagerRef.current?.broadcast({ type: 'element_add', element: el });
+        }
+        showToastRef.current('↩️ Przywrócono usunięty element');
+        break;
+      }
+      case 'modify': {
+        const beforeMap = new Map(action.before.map((e) => [e.id, e]));
+        const updated = elementsRef.current.map((e) => beforeMap.get(e.id) || e);
+        elementsRef.current = updated;
+        setElements(updated);
+        for (const el of action.before) {
+          networkManagerRef.current?.broadcast({ type: 'element_update', element: el });
+        }
+        showToastRef.current('↩️ Cofnięto modyfikację');
+        break;
+      }
+      case 'clear': {
+        elementsRef.current = action.previousElements;
+        setElements(action.previousElements);
+        networkManagerRef.current?.broadcast({
+          type: 'board_sync',
+          elements: action.previousElements,
+          settings: boardSettingsRef.current,
+        });
+        showToastRef.current('↩️ Cofnięto wyczyszczenie tablicy');
         break;
       }
     }
 
-    // 2. Jeśli stos lokalny był pusty, znajdź od końca element oznaczony moim userId
-    if (!targetId && myId) {
-      for (let i = elementsRef.current.length - 1; i >= 0; i--) {
-        const el = elementsRef.current[i];
-        if (el.userId === myId) {
-          targetId = el.id;
-          break;
+    setUndoRevision((r) => r + 1);
+  }, []);
+
+  // Wszechstronne Collaborative Redo
+  const handleRedo = useCallback(() => {
+    if (redoStackRef.current.length === 0) return;
+
+    const action = redoStackRef.current.pop()!;
+    undoStackRef.current.push(action);
+
+    switch (action.type) {
+      case 'add': {
+        const updated = [...elementsRef.current.filter((e) => e.id !== action.element.id), action.element];
+        elementsRef.current = updated;
+        setElements(updated);
+        networkManagerRef.current?.broadcast({ type: 'element_add', element: action.element });
+        showToastRef.current('↪️ Ponowiono narysowanie');
+        break;
+      }
+      case 'delete': {
+        const toDeleteIds = new Set(action.elements.map((e) => e.id));
+        const updated = elementsRef.current.filter((e) => !toDeleteIds.has(e.id));
+        elementsRef.current = updated;
+        setElements(updated);
+        for (const el of action.elements) {
+          networkManagerRef.current?.broadcast({ type: 'element_delete', id: el.id });
         }
+        showToastRef.current('↪️ Ponowiono usunięcie');
+        break;
+      }
+      case 'modify': {
+        const afterMap = new Map(action.after.map((e) => [e.id, e]));
+        const updated = elementsRef.current.map((e) => afterMap.get(e.id) || e);
+        elementsRef.current = updated;
+        setElements(updated);
+        for (const el of action.after) {
+          networkManagerRef.current?.broadcast({ type: 'element_update', element: el });
+        }
+        showToastRef.current('↪️ Ponowiono modyfikację');
+        break;
+      }
+      case 'clear': {
+        elementsRef.current = [];
+        setElements([]);
+        networkManagerRef.current?.broadcast({
+          type: 'board_sync',
+          elements: [],
+          settings: boardSettingsRef.current,
+        });
+        showToastRef.current('↪️ Ponowiono wyczyszczenie tablicy');
+        break;
       }
     }
 
-    // 3. Fallback: jeśli nadal brak lub praca solo, weź ostatni element tablicy
-    if (!targetId && elementsRef.current.length > 0) {
-      targetId = elementsRef.current[elementsRef.current.length - 1].id;
-    }
-
-    if (!targetId) return;
-
-    const targetElement = elementsRef.current.find((e) => e.id === targetId);
-    if (targetElement) {
-      myRedoElementsRef.current.push(targetElement);
-    }
-
-    const updated = elementsRef.current.filter((e) => e.id !== targetId);
-    elementsRef.current = updated;
-    setElements(updated);
     setUndoRevision((r) => r + 1);
-
-    // Rozgłoś usunięcie tego konkretnego elementu u wszystkich w pokoju
-    networkManagerRef.current?.broadcast({
-      type: 'element_delete',
-      id: targetId,
-    });
-    showToastRef.current('↩️ Cofnięto Twój element');
-  }, []);
-
-  // Collaborative Redo: przywraca cofnięty własny element i rozgłasza do wszystkich
-  const handleRedo = useCallback(() => {
-    if (myRedoElementsRef.current.length === 0) return;
-    const restored = myRedoElementsRef.current.pop()!;
-
-    myUndoStackRef.current.push(restored.id);
-    const updated = [...elementsRef.current.filter((e) => e.id !== restored.id), restored];
-    elementsRef.current = updated;
-    setElements(updated);
-    setUndoRevision((r) => r + 1);
-
-    // Rozgłoś dodanie przywróconego elementu u wszystkich
-    networkManagerRef.current?.broadcast({
-      type: 'element_add',
-      element: restored,
-    });
-    showToastRef.current('↪️ Przywrócono element');
   }, []);
 
   // Setup Lobby Networking
@@ -668,6 +738,48 @@ export const App: React.FC = () => {
     remoteCursors,
   ]);
 
+  // Auto Shape Detection & Hold-to-adjust (styl Procreate/GoodNotes: narysuj i przytrzymaj, aby dopasować i płynnie modyfikować)
+  const triggerAutoShapeSnap = (snapPointerWorldPos?: Point) => {
+    setCurrentStroke((latestPoints) => {
+      if (latestPoints.length < 5) return latestPoints;
+      const detected = detectShape(latestPoints);
+      if (detected) {
+        const activeColor = currentTool === 'pen' ? toolSettings.pen.color : toolSettings.highlighter.color;
+        const activeSize = currentTool === 'pen' ? toolSettings.pen.size : toolSettings.highlighter.size;
+        const shapeEl: ShapeElement = {
+          id: 'shape_' + Math.random().toString(36).substring(2, 9),
+          type: 'shape',
+          shapeType: detected.shapeType,
+          x: detected.x,
+          y: detected.y,
+          width: detected.width,
+          height: detected.height,
+          points: detected.points,
+          color: activeColor,
+          strokeWidth: activeSize,
+          timestamp: Date.now(),
+        };
+        setSnappedShape(shapeEl);
+
+        isAdjustingSnappedShapeRef.current = true;
+        snappedInitialShapeRef.current = {
+          ...shapeEl,
+          points: shapeEl.points ? shapeEl.points.map((p) => ({ ...p })) : undefined,
+        };
+        const lastPt = latestPoints[latestPoints.length - 1];
+        snapStartPointerRef.current =
+          snapPointerWorldPos || (lastPt ? { x: lastPt.x, y: lastPt.y } : { x: detected.x, y: detected.y });
+
+        try {
+          if (typeof navigator !== 'undefined' && navigator.vibrate) {
+            navigator.vibrate(40);
+          }
+        } catch (e) {}
+      }
+      return latestPoints;
+    });
+  };
+
   // Pointer Down Handler
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     try {
@@ -721,6 +833,7 @@ export const App: React.FC = () => {
       if (selectedElements.length > 0) {
         const handle = getHandleAtPoint(worldPos, selectedElements, transform);
         if (handle) {
+          resizedInitialElementsRef.current = selectedElements.map((el) => JSON.parse(JSON.stringify(el)));
           setActiveResizeHandle(handle);
           setDragStart(worldPos);
           const combinedBBox = getCombinedBBox(selectedElements);
@@ -760,6 +873,9 @@ export const App: React.FC = () => {
         }
         setElementInitialPositions(initPosMap);
         setStrokeInitialPoints(strokePtsMap);
+        draggedInitialElementsRef.current = elements
+          .filter((item) => newSelectedIds.includes(item.id))
+          .map((el) => JSON.parse(JSON.stringify(el)));
       } else {
         // Clicked on empty canvas: Start Marquee Area Selection!
         setSelectedElementIds([]);
@@ -781,11 +897,13 @@ export const App: React.FC = () => {
       if (toolSettings.eraser.mode === 'stroke') {
         const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
         if (hit) {
+          pushUndoAction({ type: 'delete', elements: [hit] });
           const next = elements.filter((el) => el.id !== hit.id);
           pushToHistory(next);
           networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
         }
       } else {
+        draggedInitialElementsRef.current = elements.map((el) => JSON.parse(JSON.stringify(el)));
         setIsDrawing(true);
         setCurrentStroke([worldPos]);
         applyPixelEraser(worldPos);
@@ -832,8 +950,8 @@ export const App: React.FC = () => {
     if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
       holdTimerRef.current = window.setTimeout(() => {
-        triggerAutoShapeSnap();
-      }, 400);
+        triggerAutoShapeSnap(worldPos);
+      }, 350);
     }
   };
 
@@ -1107,6 +1225,69 @@ export const App: React.FC = () => {
       return;
     }
 
+    // Interaktywna modyfikacja dopasowanego kształtu podczas trzymania rysowania
+    if (isAdjustingSnappedShapeRef.current && snappedInitialShapeRef.current && snapStartPointerRef.current) {
+      const base = snappedInitialShapeRef.current;
+      const pStart = snapStartPointerRef.current;
+      const dx = worldPos.x - pStart.x;
+      const dy = worldPos.y - pStart.y;
+
+      if (base.shapeType === 'line' || base.shapeType === 'arrow' || base.shapeType === 'double_arrow') {
+        if (base.points && base.points.length >= 2) {
+          const p0 = { x: base.points[0].x + dx, y: base.points[0].y + dy };
+          const p1 = { x: base.points[1].x + dx, y: base.points[1].y + dy };
+          const newMinX = Math.min(p0.x, p1.x);
+          const newMinY = Math.min(p0.y, p1.y);
+          const newWidth = Math.max(1, Math.abs(p1.x - p0.x));
+          const newHeight = Math.max(1, Math.abs(p1.y - p0.y));
+          setSnappedShape({
+            ...base,
+            x: newMinX,
+            y: newMinY,
+            width: newWidth,
+            height: newHeight,
+            points: [p0, p1],
+          });
+        }
+      } else if (base.shapeType === 'circle') {
+        const cx = base.x + base.width / 2;
+        const cy = base.y + base.height / 2;
+        const newRadius = Math.max(8, Math.round(Math.hypot(worldPos.x - cx, worldPos.y - cy)));
+        setSnappedShape({
+          ...base,
+          x: cx - newRadius,
+          y: cy - newRadius,
+          width: newRadius * 2,
+          height: newRadius * 2,
+        });
+      } else {
+        // Prostokąt, trójkąt, elipsa, wielokąt: skalowanie od środka
+        const cx = base.x + base.width / 2;
+        const cy = base.y + base.height / 2;
+        const initDist = Math.max(10, Math.hypot(pStart.x - cx, pStart.y - cy));
+        const currDist = Math.max(10, Math.hypot(worldPos.x - cx, worldPos.y - cy));
+        const scaleFactor = Math.max(0.15, Math.min(10, currDist / initDist));
+        const newWidth = Math.max(10, Math.round(base.width * scaleFactor));
+        const newHeight = Math.max(10, Math.round(base.height * scaleFactor));
+        const newPoints = base.points
+          ? base.points.map((p) => ({
+              x: Math.round(cx + (p.x - cx) * scaleFactor),
+              y: Math.round(cy + (p.y - cy) * scaleFactor),
+            }))
+          : undefined;
+
+        setSnappedShape({
+          ...base,
+          x: cx - newWidth / 2,
+          y: cy - newHeight / 2,
+          width: newWidth,
+          height: newHeight,
+          points: newPoints,
+        });
+      }
+      return;
+    }
+
     // Freehand stroke / shape drawing
     if (isDrawing) {
       setCurrentStroke((prev) => {
@@ -1131,8 +1312,8 @@ export const App: React.FC = () => {
             lastAnchorRef.current = worldPos;
             if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
             holdTimerRef.current = window.setTimeout(() => {
-              triggerAutoShapeSnap();
-            }, 400);
+              triggerAutoShapeSnap(worldPos);
+            }, 350);
           }
         } else {
           lastAnchorRef.current = worldPos;
@@ -1168,38 +1349,6 @@ export const App: React.FC = () => {
     if (changed) {
       setElements(nextElements);
     }
-  };
-
-  // Auto Shape Detection
-  const triggerAutoShapeSnap = () => {
-    setCurrentStroke((latestPoints) => {
-      if (latestPoints.length < 5) return latestPoints;
-      const detected = detectShape(latestPoints);
-      if (detected) {
-        const activeColor = currentTool === 'pen' ? toolSettings.pen.color : toolSettings.highlighter.color;
-        const activeSize = currentTool === 'pen' ? toolSettings.pen.size : toolSettings.highlighter.size;
-        const shapeEl: ShapeElement = {
-          id: 'shape_' + Math.random().toString(36).substring(2, 9),
-          type: 'shape',
-          shapeType: detected.shapeType,
-          x: detected.x,
-          y: detected.y,
-          width: detected.width,
-          height: detected.height,
-          points: detected.points,
-          color: activeColor,
-          strokeWidth: activeSize,
-          timestamp: Date.now(),
-        };
-        setSnappedShape(shapeEl);
-        try {
-          if (typeof navigator !== 'undefined' && navigator.vibrate) {
-            navigator.vibrate(35);
-          }
-        } catch (e) {}
-      }
-      return latestPoints;
-    });
   };
 
   // Pointer Up Handler
@@ -1255,6 +1404,49 @@ export const App: React.FC = () => {
     setActiveResizeHandle(null);
     setInitialBBox(null);
     setActiveRotationAngle(null);
+
+    // Sprawdź czy nastąpiło przesunięcie zaznaczonych elementów
+    if (draggedInitialElementsRef.current.length > 0) {
+      const beforeList = draggedInitialElementsRef.current;
+      draggedInitialElementsRef.current = [];
+      const movedIds = new Set(beforeList.map((e) => e.id));
+      const afterList = elementsRef.current.filter((e) => movedIds.has(e.id));
+      const hasChanged = beforeList.some((b) => {
+        const a = afterList.find((el) => el.id === b.id);
+        if (!a) return false;
+        if ((a as any).x !== (b as any).x || (a as any).y !== (b as any).y) return true;
+        if (a.type === 'stroke' && b.type === 'stroke') {
+          if (a.points.length !== b.points.length) return true;
+          if (a.points[0]?.x !== b.points[0]?.x || a.points[0]?.y !== b.points[0]?.y) return true;
+        }
+        return false;
+      });
+      if (hasChanged && afterList.length > 0) {
+        pushUndoAction({ type: 'modify', before: beforeList, after: afterList });
+      }
+    }
+
+    // Sprawdź czy nastąpiła modyfikacja przez uchwyt (skalowanie / obrót / promień)
+    if (resizedInitialElementsRef.current.length > 0) {
+      const beforeList = resizedInitialElementsRef.current;
+      resizedInitialElementsRef.current = [];
+      const resizedIds = new Set(beforeList.map((e) => e.id));
+      const afterList = elementsRef.current.filter((e) => resizedIds.has(e.id));
+      const hasChanged = beforeList.some((b) => {
+        const a = afterList.find((el) => el.id === b.id);
+        if (!a) return false;
+        return (
+          (a as any).x !== (b as any).x ||
+          (a as any).y !== (b as any).y ||
+          (a as any).width !== (b as any).width ||
+          (a as any).height !== (b as any).height ||
+          (a as any).rotation !== (b as any).rotation
+        );
+      });
+      if (hasChanged && afterList.length > 0) {
+        pushUndoAction({ type: 'modify', before: beforeList, after: afterList });
+      }
+    }
 
     // If we were dragging selected elements, broadcast their new positions
     if (currentTool === 'select' && selectedElementIds.length > 0) {
@@ -1316,8 +1508,15 @@ export const App: React.FC = () => {
       networkManagerRef.current?.broadcast({ type: 'element_add', element: shapeWithUser });
       setSnappedShape(null);
       setCurrentStroke([]);
+      isAdjustingSnappedShapeRef.current = false;
+      snappedInitialShapeRef.current = null;
+      snapStartPointerRef.current = null;
       return;
     }
+
+    isAdjustingSnappedShapeRef.current = false;
+    snappedInitialShapeRef.current = null;
+    snapStartPointerRef.current = null;
 
     if (currentTool === 'shape' && currentStroke.length >= 2) {
       const myId = networkManagerRef.current?.getUserId() || 'me';
@@ -1472,6 +1671,7 @@ export const App: React.FC = () => {
           id: 'shape_' + Math.random().toString(36).substring(2, 9),
           x: target.x + offset,
           y: target.y + offset,
+          points: target.points ? target.points.map((p) => ({ x: p.x + offset, y: p.y + offset })) : undefined,
         });
       } else if (target.type === 'image') {
         const clonedImg: ImageElement = {
@@ -1493,23 +1693,41 @@ export const App: React.FC = () => {
       }
     }
 
+    if (clonedList.length === 0) return;
+    for (const clone of clonedList) {
+      pushUndoAction({ type: 'add', element: clone });
+    }
     pushToHistory([...elements, ...clonedList]);
     setSelectedElementIds(clonedList.map((c) => c.id));
+    for (const clone of clonedList) {
+      networkManagerRef.current?.broadcast({ type: 'element_add', element: clone });
+    }
   };
 
   const handleRotateSelected = () => {
     if (selectedElementIds.length === 0) return;
-    setElements((prev) =>
-      prev.map((el) => {
-        if (!selectedElementIds.includes(el.id)) return el;
-        const currentRot = (el as any).rotation || 0;
-        return { ...el, rotation: (currentRot + 90) % 360 };
-      })
-    );
+    const before = elements
+      .filter((el) => selectedElementIds.includes(el.id))
+      .map((el) => JSON.parse(JSON.stringify(el)));
+    const updated = elements.map((el) => {
+      if (!selectedElementIds.includes(el.id)) return el;
+      const currentRot = (el as any).rotation || 0;
+      return { ...el, rotation: (currentRot + 90) % 360 };
+    });
+    const after = updated.filter((el) => selectedElementIds.includes(el.id));
+    pushUndoAction({ type: 'modify', before, after });
+    elementsRef.current = updated;
+    setElements(updated);
+    for (const el of after) {
+      networkManagerRef.current?.broadcast({ type: 'element_update', element: el });
+    }
   };
 
   const handleDeleteSelected = () => {
     if (selectedElementIds.length === 0) return;
+    const toDelete = elements.filter((el) => selectedElementIds.includes(el.id));
+    if (toDelete.length === 0) return;
+    pushUndoAction({ type: 'delete', elements: toDelete });
     const next = elements.filter((el) => !selectedElementIds.includes(el.id));
     pushToHistory(next);
     for (const id of selectedElementIds) {
@@ -1522,14 +1740,36 @@ export const App: React.FC = () => {
     if (selectedElementIds.length === 0) return;
     const unselected = elements.filter((el) => !selectedElementIds.includes(el.id));
     const selected = elements.filter((el) => selectedElementIds.includes(el.id));
-    pushToHistory([...unselected, ...selected]);
+    const next = [...unselected, ...selected];
+    pushUndoAction({
+      type: 'modify',
+      before: elements.map((e) => JSON.parse(JSON.stringify(e))),
+      after: next.map((e) => JSON.parse(JSON.stringify(e))),
+    });
+    pushToHistory(next);
+    networkManagerRef.current?.broadcast({
+      type: 'board_sync',
+      elements: next,
+      settings: boardSettings,
+    });
   };
 
   const handleSendToBack = () => {
     if (selectedElementIds.length === 0) return;
     const unselected = elements.filter((el) => !selectedElementIds.includes(el.id));
     const selected = elements.filter((el) => selectedElementIds.includes(el.id));
-    pushToHistory([...selected, ...unselected]);
+    const next = [...selected, ...unselected];
+    pushUndoAction({
+      type: 'modify',
+      before: elements.map((e) => JSON.parse(JSON.stringify(e))),
+      after: next.map((e) => JSON.parse(JSON.stringify(e))),
+    });
+    pushToHistory(next);
+    networkManagerRef.current?.broadcast({
+      type: 'board_sync',
+      elements: next,
+      settings: boardSettings,
+    });
   };
 
   const handleSetCircleRadius = (newRadius: number) => {
@@ -1548,6 +1788,7 @@ export const App: React.FC = () => {
       width: r * 2,
       height: r * 2,
     };
+    pushUndoAction({ type: 'modify', before: [JSON.parse(JSON.stringify(target))], after: [updated] });
     pushToHistory(elements.map((e) => (e.id === targetId ? updated : e)));
     networkManagerRef.current?.broadcast({ type: 'element_update', element: updated });
   };
@@ -1685,7 +1926,9 @@ export const App: React.FC = () => {
   const handleClearCanvas = () => {
     if (elements.length === 0) return;
     if (confirm('Czy na pewno chcesz wyczyścić całą tablicę?')) {
-      pushToHistory([]);
+      pushUndoAction({ type: 'clear', previousElements: elements });
+      elementsRef.current = [];
+      setElements([]);
       setSelectedElementIds([]);
       networkManagerRef.current?.broadcast({
         type: 'board_sync',
@@ -1831,8 +2074,8 @@ export const App: React.FC = () => {
         toolSettings={toolSettings}
         autoShapeEnabled={autoShapeEnabled}
         scale={transform.scale}
-        canUndo={myUndoStackRef.current.length > 0 || elements.some((e) => e.userId === networkManagerRef.current?.getUserId()) || elements.length > 0}
-        canRedo={myRedoElementsRef.current.length > 0}
+        canUndo={undoRevision >= 0 && (undoStackRef.current.length > 0 || elements.length > 0)}
+        canRedo={undoRevision >= 0 && redoStackRef.current.length > 0}
         boardSettings={boardSettings}
         connectedCount={connectedCount}
         selectedElementId={selectedElementIds.length > 0 ? selectedElementIds[0] : null}
