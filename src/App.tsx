@@ -597,6 +597,8 @@ export const App: React.FC = () => {
       // Check hit on existing elements
       const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
       if (hit) {
+        // Oblicz nową listę zaznaczonych ID lokalnie — NIE czekaj na setState (React batch!)
+        const newSelectedIds = selectedElementIds.includes(hit.id) ? selectedElementIds : [hit.id];
         if (!selectedElementIds.includes(hit.id)) {
           setSelectedElementIds([hit.id]);
         }
@@ -604,8 +606,8 @@ export const App: React.FC = () => {
 
         const initPosMap = new Map<string, Point>();
         const strokePtsMap = new Map<string, Point[]>();
-        const targetIds = selectedElementIds.includes(hit.id) ? selectedElementIds : [hit.id];
-        for (const id of targetIds) {
+        // Używamy localnych newSelectedIds — zawsze aktualne, nie czeka na React re-render
+        for (const id of newSelectedIds) {
           const el = elements.find((item) => item.id === id);
           if (el) {
             initPosMap.set(id, { x: (el as any).x || 0, y: (el as any).y || 0 });
@@ -659,6 +661,7 @@ export const App: React.FC = () => {
         color: toolSettings.laser.color,
         size: toolSettings.laser.size,
         duration: toolSettings.laser.duration,
+        break: true, // Oznacza początek nowego pociągnięcia — renderer nie połączy z poprzednim
       };
       laserTrailsRef.current.push(lp);
       networkManagerRef.current?.broadcast({ type: 'laser_stroke', points: [lp] });
@@ -800,14 +803,21 @@ export const App: React.FC = () => {
     }
 
     // Move all selected elements
-    if (currentTool === 'select' && selectedElementIds.length > 0 && dragStart && !activeResizeHandle && !isMarqueeSelecting) {
+    // Używamy elementInitialPositions.size lub strokeInitialPoints.size jako fallback
+    // gdy React jeszcze nie zaktualizował selectedElementIds (tablet — batching stanu)
+    if (currentTool === 'select' && (selectedElementIds.length > 0 || elementInitialPositions.size > 0 || strokeInitialPoints.size > 0) && dragStart && !activeResizeHandle && !isMarqueeSelecting) {
       const totalDx = worldPos.x - dragStart.x;
       const totalDy = worldPos.y - dragStart.y;
       if (totalDx === 0 && totalDy === 0) return;
 
       setElements((prev) =>
         prev.map((el) => {
-          if (!selectedElementIds.includes(el.id)) return el;
+          // Sprawdź czy element jest zaznaczony — albo przez selectedElementIds (zaktualizowany)
+          // albo przez initPos (gdy React batch jeszcze nie zaktualizował selectedElementIds)
+          const isSelected = selectedElementIds.includes(el.id) ||
+            elementInitialPositions.has(el.id) ||
+            strokeInitialPoints.has(el.id);
+          if (!isSelected) return el;
 
           if (el.type === 'shape' || el.type === 'image') {
             // Use absolute offset from fixed dragStart → no drift
@@ -1312,7 +1322,19 @@ export const App: React.FC = () => {
       setSelectedElementIds([imgElement.id]);
 
       // Broadcast smoothly to lobby
-      networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
+      // Na tablecie po wyborze pliku przeglądarka wraca z galerii/aparatu — karta mogła być
+      // w tle, więc WebRTC DataChannel może być "uśpiony". Dodajemy opóźnienie 600ms,
+      // żeby przeglądarka zdążyła przywrócić połączenie, a następnie broadcastujemy.
+      const broadcastImage = () => {
+        networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
+      };
+      if (networkManagerRef.current && networkManagerRef.current.getConnectedCount() > 1) {
+        // Jesteśmy w lobby — dajemy przeglądarce czas na "obudzenie" połączenia
+        setTimeout(broadcastImage, 600);
+      } else {
+        // Solo mode — broadcastuj od razu (nikt nie słucha, ale nie szkodzi)
+        broadcastImage();
+      }
       showToastRef.current('✅ Zdjęcie HD dodane!');
     } catch (err) {
       console.error('Error handling image upload', err);

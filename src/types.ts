@@ -83,6 +83,7 @@ export interface LaserPoint {
   size: number;
   duration?: number;
   userId?: string;
+  break?: boolean; // true = początek nowego pociągnięcia, nie rysuj segmentu od poprzedniego punktu
 }
 
 export interface RemoteCursor {

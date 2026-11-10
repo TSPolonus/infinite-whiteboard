@@ -487,6 +487,8 @@ export function drawLaserTrails(
   for (let i = 1; i < laserPoints.length; i++) {
     const p1 = laserPoints[i - 1];
     const p2 = laserPoints[i];
+    // Nie rysuj segmentu jeśli p2 to początek nowego pociągnięcia (break marker)
+    if (p2.break) continue;
     const duration = p2.duration || defaultDuration;
     // Compute age using receivedAt if present to eliminate cross-screen clock skew!
     const age = now - (p2.receivedAt || p2.timestamp);
@@ -510,6 +512,8 @@ export function drawLaserTrails(
   for (let i = 1; i < laserPoints.length; i++) {
     const p1 = laserPoints[i - 1];
     const p2 = laserPoints[i];
+    // Nie rysuj segmentu jeśli p2 to początek nowego pociągnięcia (break marker)
+    if (p2.break) continue;
     const duration = p2.duration || defaultDuration;
     const age = now - (p2.receivedAt || p2.timestamp);
     if (age >= duration || age < 0) continue;
