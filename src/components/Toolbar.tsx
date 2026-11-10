@@ -884,7 +884,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/jpeg,image/png,image/webp,image/gif,image/*"
+            accept="image/jpeg,image/png,image/webp"
             style={{ display: 'none' }}
             onChange={handleFileChange}
           />

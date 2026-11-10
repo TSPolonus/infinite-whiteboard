@@ -36,7 +36,7 @@ const PEER_CONFIG = {
   },
 };
 
-const CHUNK_SIZE = 8000; // 8KB per chunk - perfectly safe for mobile WebRTC DataChannels
+const CHUNK_SIZE = 4000; // 4KB per chunk - safely below PeerJS 16KB internal MTU and WebRTC 64KB SCTP limit
 
 export interface NetworkCallbacks {
   onElementAdd: (el: CanvasElement) => void;
@@ -136,7 +136,7 @@ export class BoardNetworkManager {
         if (!connectedToHost && this.peer === clientPeer) {
           this.initAsHost(cleanCode);
         }
-      }, 3500);
+      }, 7500);
     });
 
     clientPeer.on('error', (err) => {
@@ -366,13 +366,13 @@ export class BoardNetworkManager {
     // Check PeerJS underlying RTCDataChannel buffer
     const dc = (conn as any).dataChannel as RTCDataChannel | undefined;
     const buffered = dc?.bufferedAmount ?? 0;
-    const MAX_BUFFER = 24576; // 24KB threshold for mobile devices
+    const MAX_BUFFER = 16384; // 16KB threshold for mobile devices
 
     if (buffered > MAX_BUFFER) {
-      // Buffer is congested: wait 30ms for buffer to clear before sending next chunk
+      // Buffer is congested: wait 25ms for buffer to clear before sending next chunk
       setTimeout(() => {
         this.sendSingleChunk(conn, jsonStr, msgId, totalChunks, index);
-      }, 30);
+      }, 25);
       return;
     }
 
@@ -387,15 +387,14 @@ export class BoardNetworkManager {
       });
     } catch (e) {
       console.warn(`sendSafe chunk ${index}/${totalChunks} warning`, e);
-      // Do NOT kill the connection! Just stop transmitting this packet.
       return;
     }
 
     if (index + 1 < totalChunks) {
-      // Send next chunk with small delay so mobile network stack can dispatch packets cleanly
+      // Send next chunk with 15ms spacing so mobile network stack can dispatch packets cleanly
       setTimeout(() => {
         this.sendSingleChunk(conn, jsonStr, msgId, totalChunks, index + 1);
-      }, 12);
+      }, 15);
     }
   }
 
@@ -406,12 +405,6 @@ export class BoardNetworkManager {
     }
     if (this.peer.disconnected) {
       this.peer.reconnect();
-    }
-    if (!this.isHost) {
-      const hasOpenConn = Array.from(this.connections.values()).some((c) => c.open);
-      if (!hasOpenConn) {
-        this.connect(roomCode);
-      }
     }
   }
 

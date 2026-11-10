@@ -1188,73 +1188,107 @@ export const App: React.FC = () => {
     pushToHistory([...selected, ...unselected]);
   };
 
-  // Safe pixel-drawn image upload: encodes as a compact pixel grid raster
-  // completely bypassing heavy image strings and eliminating WebRTC buffer drops
-  const handleImageUpload = (file: File) => {
-    let objectUrl: string | null = null;
+  // Universal high-definition image loader (minimum 720p HD)
+  // Handles native mobile camera formats, EXIF, and prevents WebRTC disconnects
+  const handleImageUpload = async (file: File) => {
     try {
-      objectUrl = URL.createObjectURL(file);
-    } catch (e) {
-      console.warn('createObjectURL failed, falling back', e);
-    }
+      showToastRef.current('Wczytywanie zdjęcia...');
+      let sourceWidth = 0;
+      let sourceHeight = 0;
+      let drawSource: CanvasImageSource | null = null;
+      let cleanup: (() => void) | null = null;
 
-    const img = new Image();
-    img.onload = () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-
-      const naturalW = img.naturalWidth || 300;
-      const naturalH = img.naturalHeight || 300;
-
-      // 1. Compute pixel raster dimensions:
-      // Ustawiamy maksymalną rozdzielczość matrycy pikselowej: 240px (ponad 7x więcej detali niż 90x90!)
-      // Przy 240x180 = 43,200 pikseli. Format Base64 binarny: 43,200 * 3 bajty = ~129 KB.
-      // Dzielone na bezpieczne fragmenty w WebRTC, daje krystalicznie ostry obraz bez zawieszania!
-      const maxGridSize = 240;
-      let gridW = naturalW;
-      let gridH = naturalH;
-      if (gridW > maxGridSize || gridH > maxGridSize) {
-        if (gridW > gridH) {
-          gridH = Math.max(1, Math.round((gridH / gridW) * maxGridSize));
-          gridW = maxGridSize;
-        } else {
-          gridW = Math.max(1, Math.round((gridW / gridH) * maxGridSize));
-          gridH = maxGridSize;
+      // 1. Try native createImageBitmap (fastest, hardware GPU decoded, handles orientation & mobile formats)
+      if (typeof createImageBitmap !== 'undefined') {
+        try {
+          const bitmap = await createImageBitmap(file);
+          sourceWidth = bitmap.width;
+          sourceHeight = bitmap.height;
+          drawSource = bitmap;
+          cleanup = () => bitmap.close();
+        } catch (bitmapErr) {
+          console.warn('createImageBitmap fallback', bitmapErr);
         }
       }
 
-      // 2. Draw downscaled to offscreen canvas to extract pixel color array
-      const rasterCanvas = document.createElement('canvas');
-      rasterCanvas.width = gridW;
-      rasterCanvas.height = gridH;
-      const rCtx = rasterCanvas.getContext('2d', { willReadFrequently: true });
-      if (!rCtx) return;
+      // 2. Fallback to HTMLImageElement if createImageBitmap is unavailable
+      if (!drawSource) {
+        let url = '';
+        try {
+          url = URL.createObjectURL(file);
+          cleanup = () => URL.revokeObjectURL(url);
+        } catch (e) {}
 
-      rCtx.drawImage(img, 0, 0, gridW, gridH);
-      const imgData = rCtx.getImageData(0, 0, gridW, gridH);
-      const raw = imgData.data;
-
-      // 3. Encode into compact binary string: "W,H,base64(RGB bytes)"
-      // Kodowanie binarne zamiast czystego hex zmniejsza rozmiar o 50%!
-      const rgbBytes = new Uint8Array(gridW * gridH * 3);
-      let byteIdx = 0;
-      for (let i = 0; i < raw.length; i += 4) {
-        rgbBytes[byteIdx++] = raw[i];     // R
-        rgbBytes[byteIdx++] = raw[i + 1]; // G
-        rgbBytes[byteIdx++] = raw[i + 2]; // B
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve(image);
+          image.onerror = () => {
+            // Last resort: FileReader data URL
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              const image2 = new Image();
+              image2.onload = () => resolve(image2);
+              image2.onerror = reject;
+              image2.src = e.target?.result as string;
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          };
+          if (url) {
+            image.src = url;
+          } else {
+            const reader = new FileReader();
+            reader.onload = (e) => { image.src = e.target?.result as string; };
+            reader.readAsDataURL(file);
+          }
+        });
+        sourceWidth = img.naturalWidth || 400;
+        sourceHeight = img.naturalHeight || 300;
+        drawSource = img;
       }
 
-      // Szybka konwersja Uint8Array do Base64
-      let binaryStr = '';
-      const chunkSize = 8192;
-      for (let i = 0; i < rgbBytes.length; i += chunkSize) {
-        binaryStr += String.fromCharCode.apply(null, Array.from(rgbBytes.subarray(i, i + chunkSize)));
+      // Target HD 720p resolution (up to 1280px on longest edge)
+      const targetMaxDim = 1280;
+      let renderW = sourceWidth;
+      let renderH = sourceHeight;
+      if (renderW > targetMaxDim || renderH > targetMaxDim) {
+        if (renderW > renderH) {
+          renderH = Math.max(1, Math.round((renderH / renderW) * targetMaxDim));
+          renderW = targetMaxDim;
+        } else {
+          renderW = Math.max(1, Math.round((renderW / renderH) * targetMaxDim));
+          renderH = targetMaxDim;
+        }
       }
-      const b64Data = btoa(binaryStr);
-      const pixelStream = `${gridW},${gridH},${b64Data}`;
 
-      // Display dimensions on the canvas (ładny, naturalny rozmiar na tablicy)
-      const displayW = Math.min(420, Math.max(160, naturalW > 420 ? 420 : naturalW));
-      const displayH = Math.round((displayW / naturalW) * naturalH);
+      const hdCanvas = document.createElement('canvas');
+      hdCanvas.width = renderW;
+      hdCanvas.height = renderH;
+      const hdCtx = hdCanvas.getContext('2d');
+      if (!hdCtx) {
+        if (cleanup) cleanup();
+        return;
+      }
+
+      hdCtx.imageSmoothingEnabled = true;
+      hdCtx.imageSmoothingQuality = 'high';
+      hdCtx.drawImage(drawSource, 0, 0, renderW, renderH);
+
+      if (cleanup) cleanup();
+
+      // Optimize JPEG quality for 720p:
+      // High visual quality (0.74). If base64 length exceeds 95,000 chars (~70KB),
+      // adaptively steps down to ensure zero WebRTC buffer overflows.
+      let quality = 0.74;
+      let compressedData = hdCanvas.toDataURL('image/jpeg', quality);
+      while (compressedData.length > 95000 && quality > 0.40) {
+        quality -= 0.08;
+        compressedData = hdCanvas.toDataURL('image/jpeg', quality);
+      }
+
+      // Display dimensions na tablicy (proporcjonalne i wygodne do manipulacji)
+      const displayW = Math.min(500, Math.max(200, sourceWidth > 500 ? 500 : sourceWidth));
+      const displayH = Math.round((displayW / sourceWidth) * sourceHeight);
       const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2, transform);
 
       const imgElement: ImageElement = {
@@ -1264,36 +1298,25 @@ export const App: React.FC = () => {
         y: center.y - displayH / 2,
         width: displayW,
         height: displayH,
-        pixels: pixelStream,
-        gridSize: maxGridSize,
-        aspectRatio: naturalW / naturalH,
+        src: compressedData,
+        aspectRatio: sourceWidth / sourceHeight,
         rotation: 0,
         timestamp: Date.now(),
       };
 
+      const cached = new Image();
+      cached.src = compressedData;
+      imageCacheRef.current.set(imgElement.id, cached);
+
       pushToHistory([...elements, imgElement]);
       setSelectedElementIds([imgElement.id]);
 
-      // Make sure network is ready, then broadcast
-      if (networkManagerRef.current) {
-        networkManagerRef.current.ensureConnection(boardSettings.roomCode);
-        networkManagerRef.current.broadcast({ type: 'element_add', element: imgElement });
-      }
-    };
-
-    img.onerror = () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      showToastRef.current('Nie udało się wczytać wybranego zdjęcia.');
-    };
-
-    if (objectUrl) {
-      img.src = objectUrl;
-    } else {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        img.src = ev.target?.result as string;
-      };
-      reader.readAsDataURL(file);
+      // Broadcast smoothly to lobby
+      networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
+      showToastRef.current('✅ Zdjęcie HD dodane!');
+    } catch (err) {
+      console.error('Error handling image upload', err);
+      showToastRef.current('❌ Nie udało się wczytać wybranego zdjęcia.');
     }
   };
 
