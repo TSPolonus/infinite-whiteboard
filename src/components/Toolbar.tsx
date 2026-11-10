@@ -32,7 +32,7 @@ import {
   Check,
   Paintbrush,
 } from 'lucide-react';
-import type { Tool, ShapeType, BoardSettings, ToolSettings } from '../types';
+import type { Tool, ShapeType, BoardSettings, ToolSettings, CanvasElement } from '../types';
 
 interface ToolbarProps {
   currentTool: Tool;
@@ -45,6 +45,7 @@ interface ToolbarProps {
   boardSettings: BoardSettings;
   connectedCount: number;
   selectedElementId: string | null;
+  selectedElement?: CanvasElement | null;
   onToolChange: (tool: Tool) => void;
   onShapeChange: (shape: ShapeType) => void;
   onUpdateToolSetting: <T extends keyof ToolSettings>(tool: T, settings: Partial<ToolSettings[T]>) => void;
@@ -64,6 +65,8 @@ interface ToolbarProps {
   onDeleteSelected: () => void;
   onBringToFront: () => void;
   onSendToBack: () => void;
+  onUpdateCircleRadius?: (radius: number) => void;
+  onOpenIosGuide?: () => void;
 }
 
 const PEN_COLORS = [
@@ -125,6 +128,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   boardSettings,
   connectedCount,
   selectedElementId,
+  selectedElement,
   onToolChange,
   onShapeChange,
   onUpdateToolSetting,
@@ -144,6 +148,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onDeleteSelected,
   onBringToFront,
   onSendToBack,
+  onUpdateCircleRadius,
+  onOpenIosGuide,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showSubMenu, setShowSubMenu] = useState<Tool | null>('pen');
@@ -308,6 +314,24 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
           <button
             className="glass-btn"
+            onClick={onOpenIosGuide}
+            title="Instrukcja dla tabletu Apple (iPad / iOS) i dodawanie do pulpitu"
+            style={{
+              padding: '6px 10px',
+              gap: 5,
+              background: 'rgba(168, 85, 247, 0.15)',
+              border: '1px solid rgba(168, 85, 247, 0.3)',
+              color: '#c084fc',
+              fontWeight: 600,
+              fontSize: 12,
+            }}
+          >
+            <span>🍎</span>
+            <span className="hidden-mobile">iPad / iOS</span>
+          </button>
+
+          <button
+            className="glass-btn"
             onClick={onOpenSettingsModal}
             title="Ustawienia tablicy"
             style={{ padding: 6 }}
@@ -356,6 +380,57 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           >
             🔄 <span>Obróć 90°</span>
           </button>
+
+          {/* Opcja ustalenia promienia okręgu */}
+          {selectedElement && selectedElement.type === 'shape' && selectedElement.shapeType === 'circle' && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                padding: '0 8px',
+                borderLeft: '1px solid rgba(255, 255, 255, 0.15)',
+              }}
+            >
+              <span style={{ fontSize: 12, color: '#38bdf8', fontWeight: 600 }}>Promień (R):</span>
+              <button
+                className="glass-btn"
+                onClick={() => onUpdateCircleRadius?.(Math.max(5, selectedElement.width / 2 - 10))}
+                title="Zmniejsz promień o 10px"
+                style={{ padding: '2px 8px', fontSize: 13, minWidth: 24, height: 26, fontWeight: 700 }}
+              >
+                -
+              </button>
+              <input
+                type="number"
+                min="5"
+                max="5000"
+                value={Math.round(selectedElement.width / 2)}
+                onChange={(e) => onUpdateCircleRadius?.(Math.max(5, parseInt(e.target.value) || 10))}
+                style={{
+                  width: 54,
+                  height: 26,
+                  background: 'rgba(0, 0, 0, 0.45)',
+                  border: '1px solid #38bdf8',
+                  borderRadius: 6,
+                  color: '#ffffff',
+                  textAlign: 'center',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  outline: 'none',
+                }}
+              />
+              <span style={{ fontSize: 11, color: '#94a3b8' }}>px</span>
+              <button
+                className="glass-btn"
+                onClick={() => onUpdateCircleRadius?.(selectedElement.width / 2 + 10)}
+                title="Zwiększ promień o 10px"
+                style={{ padding: '2px 8px', fontSize: 13, minWidth: 24, height: 26, fontWeight: 700 }}
+              >
+                +
+              </button>
+            </div>
+          )}
           <button
             className="glass-btn"
             onClick={onDuplicateSelected}

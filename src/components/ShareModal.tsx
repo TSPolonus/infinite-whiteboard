@@ -26,6 +26,7 @@ interface ShareModalProps {
   onReconnect: () => void;
   onLeaveLobby: () => void;
   onCreateNewLobby: () => void;
+  onOpenIosGuide?: () => void;
 }
 
 export const ShareModal: React.FC<ShareModalProps> = ({
@@ -39,6 +40,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
   onReconnect,
   onLeaveLobby,
   onCreateNewLobby,
+  onOpenIosGuide,
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
@@ -228,6 +230,37 @@ export const ShareModal: React.FC<ShareModalProps> = ({
             <span>{copiedCode ? 'Skopiowano!' : 'Kopiuj kod'}</span>
           </button>
         </div>
+
+        {/* Instrukcja dla Apple iPad / iOS */}
+        {onOpenIosGuide && (
+          <div style={{ marginBottom: 16 }}>
+            <button
+              type="button"
+              className="glass-btn"
+              onClick={onOpenIosGuide}
+              style={{
+                width: '100%',
+                padding: '10px 14px',
+                borderRadius: 12,
+                background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(168, 85, 247, 0.15))',
+                border: '1px solid rgba(56, 189, 248, 0.35)',
+                color: '#f8fafc',
+                fontSize: 13,
+                fontWeight: 600,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 18 }}>🍎</span>
+                <span>Instrukcja dla tabletu Apple (iPad / iOS) & Pulpit PWA</span>
+              </div>
+              <span style={{ color: '#38bdf8', fontSize: 12, fontWeight: 700 }}>Otwórz →</span>
+            </button>
+          </div>
+        )}
 
         {/* Leave Lobby / Create New Lobby Buttons */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>

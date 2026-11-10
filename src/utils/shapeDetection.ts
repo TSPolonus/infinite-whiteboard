@@ -48,8 +48,8 @@ function rdp(points: Point[], epsilon: number): Point[] {
   }
 }
 
-// Calculate angle at vertex p2 between (p1->p2) and (p2->p3) in degrees
-function getVertexAngle(p1: Point, p2: Point, p3: Point): number {
+// Calculate angle at vertex p2 between (p1->p2) and (p2->p3) in degrees (0 to 180)
+export function getVertexAngle(p1: Point, p2: Point, p3: Point): number {
   const a1 = Math.atan2(p1.y - p2.y, p1.x - p2.x);
   const a2 = Math.atan2(p3.y - p2.y, p3.x - p2.x);
   let angle = Math.abs(a1 - a2) * (180 / Math.PI);
@@ -69,7 +69,7 @@ export interface DetectedShapeResult {
 export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
   if (rawPoints.length < 5) return null;
 
-  // Filter out micro-jitter
+  // 1. Filter out micro-jitter from finger/stylus
   const points: Point[] = [rawPoints[0]];
   for (let i = 1; i < rawPoints.length; i++) {
     if (distance(rawPoints[i], points[points.length - 1]) >= 3) {
@@ -86,22 +86,27 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
   const pn = points[points.length - 1];
   const startEndDist = distance(p0, pn);
 
-  // Closed threshold
-  const isClosed = startEndDist < Math.max(50, totalLen * 0.35);
+  // Closed threshold: start is close to end
+  const isClosed = startEndDist < Math.max(55, totalLen * 0.38);
 
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let sumX = 0, sumY = 0;
   for (const p of points) {
     if (p.x < minX) minX = p.x;
     if (p.x > maxX) maxX = p.x;
     if (p.y < minY) minY = p.y;
     if (p.y > maxY) maxY = p.y;
+    sumX += p.x;
+    sumY += p.y;
   }
 
   const width = Math.max(maxX - minX, 12);
   const height = Math.max(maxY - minY, 12);
   const bboxDiagonal = Math.sqrt(width * width + height * height);
+  const cx = sumX / points.length;
+  const cy = sumY / points.length;
 
-  // 1. OPEN PATH: Straight Line
+  // 2. OPEN PATH: Straight Line or Arrow
   if (!isClosed) {
     let maxLineDist = 0;
     for (const p of points) {
@@ -121,14 +126,44 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
     }
   }
 
-  // 2. CLOSED PATH: Detect sharp corners via RDP
-  // Try simplification with adaptive epsilon
-  const simplified = rdp(points, bboxDiagonal * 0.08);
+  // 3. CIRCLE & ELLIPSE DETECTION (PRIORITY #1 TO PREVENT DETECTING AS STAR/HEXAGON)
+  // Calculate variance of distance from centroid to boundary points
+  const radii = points.map((p) => distance(p, { x: cx, y: cy }));
+  const avgRadius = radii.reduce((acc, r) => acc + r, 0) / radii.length;
+  const radiusVariance = radii.reduce((acc, r) => acc + Math.abs(r - avgRadius), 0) / radii.length;
+  const circleRatio = radiusVariance / (avgRadius || 1);
+
+  if (isClosed && circleRatio < 0.28) {
+    const aspect = width / height;
+    if (aspect >= 0.75 && aspect <= 1.33) {
+      // Okrąg (circle)
+      const r = (width + height) / 4;
+      return {
+        shapeType: 'circle',
+        x: cx - r,
+        y: cy - r,
+        width: r * 2,
+        height: r * 2,
+      };
+    } else {
+      // Owal / Elipsa (ellipse)
+      return {
+        shapeType: 'ellipse',
+        x: minX,
+        y: minY,
+        width: width,
+        height: height,
+      };
+    }
+  }
+
+  // 4. CORNER DETECTION VIA RDP SIMPLIFICATION
+  const simplified = rdp(points, bboxDiagonal * 0.075);
 
   // Clean vertices that are too close to each other
   const vertices: Point[] = [simplified[0]];
   for (let i = 1; i < simplified.length; i++) {
-    if (distance(simplified[i], vertices[vertices.length - 1]) > bboxDiagonal * 0.07) {
+    if (distance(simplified[i], vertices[vertices.length - 1]) > bboxDiagonal * 0.08) {
       vertices.push(simplified[i]);
     }
   }
@@ -137,7 +172,7 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
     vertices.pop();
   }
 
-  // Count sharp corners (angle < 135 deg)
+  // Count sharp corners (angle < 145 deg)
   const sharpCorners: Point[] = [];
   const vCount = vertices.length;
   if (vCount >= 3) {
@@ -146,156 +181,228 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
       const pCurr = vertices[i];
       const pNext = vertices[(i + 1) % vCount];
       const angle = getVertexAngle(pPrev, pCurr, pNext);
-      if (angle < 138) {
+      if (angle < 145) {
         sharpCorners.push(pCurr);
       }
     }
   }
 
-  // A) TRIANGLE: Exactly 3 sharp corners or 3-4 simplified vertices
+  // A) TRÓJKĄT (Triangle): 3 corners or 3 simplified vertices
   if (sharpCorners.length === 3 || (vCount === 3 && isClosed)) {
-    let triPoints = sharpCorners.length === 3 ? sharpCorners : vertices.slice(0, 3);
+    const triPoints = sharpCorners.length === 3 ? sharpCorners : vertices.slice(0, 3);
     return {
       shapeType: 'triangle',
       x: minX,
       y: minY,
-      width: width,
-      height: height,
+      width,
+      height,
       points: triPoints,
     };
   }
 
-  // B) DIAMOND or RECTANGLE: 4 sharp corners
-  if (sharpCorners.length === 4 || vCount === 4) {
-    const quad = sharpCorners.length === 4 ? sharpCorners : vertices;
-    // Check if diamond (vertices near midpoints of bounding box)
-    const midX = minX + width / 2;
-    const midY = minY + height / 2;
-    let diamondMatchCount = 0;
-    for (const v of quad) {
-      const nearMidX = Math.abs(v.x - midX) < width * 0.25;
-      const nearMidY = Math.abs(v.y - midY) < height * 0.25;
-      if (nearMidX || nearMidY) diamondMatchCount++;
-    }
+  // B) CZWOROKĄTY (Quadrilaterals: Kwadrat, Prostokąt, Romb, Trapez, Równoległobok, Wielokąt)
+  if (sharpCorners.length === 4 || (vCount === 4 && isClosed)) {
+    const quad = sharpCorners.length === 4 ? sharpCorners : vertices.slice(0, 4);
 
-    if (diamondMatchCount >= 3 && Math.abs(width - height) < bboxDiagonal * 0.3) {
-      return {
-        shapeType: 'diamond',
-        x: minX,
-        y: minY,
-        width: width,
-        height: height,
-      };
-    }
+    // Compute 4 corner angles
+    const angles = quad.map((curr, idx) => {
+      const prev = quad[(idx - 1 + 4) % 4];
+      const next = quad[(idx + 1) % 4];
+      return getVertexAngle(prev, curr, next);
+    });
 
-    return {
-      shapeType: 'rectangle',
-      x: minX,
-      y: minY,
-      width: width,
-      height: height,
-    };
-  }
-
-  // C) STAR or HEXAGON: 5 to 8 corners
-  if (sharpCorners.length === 5 || sharpCorners.length === 6) {
-    if (sharpCorners.length === 6) {
-      return {
-        shapeType: 'hexagon',
-        x: minX,
-        y: minY,
-        width: width,
-        height: height,
-      };
-    } else {
-      return {
-        shapeType: 'star',
-        x: minX,
-        y: minY,
-        width: width,
-        height: height,
-      };
-    }
-  }
-
-  // D) CIRCLE / ELLIPSE:
-  // Compute centroid and check radius variance.
-  // A hand-drawn circle typically has circleRatio < 0.22 and few sharp corners.
-  let sumX = 0, sumY = 0;
-  for (const p of points) {
-    sumX += p.x;
-    sumY += p.y;
-  }
-  const cx = sumX / points.length;
-  const cy = sumY / points.length;
-
-  const radii = points.map((p) => distance(p, { x: cx, y: cy }));
-  const avgRadius = radii.reduce((acc, r) => acc + r, 0) / radii.length;
-  const radiusVariance =
-    radii.reduce((acc, r) => acc + Math.abs(r - avgRadius), 0) / radii.length;
-  const circleRatio = radiusVariance / avgRadius;
-
-  // Also check that the path is reasonably closed (end close to start)
-  // A circle should close back on itself
-  const closedEnoughForCircle = startEndDist < Math.max(60, totalLen * 0.40);
-
-  // Liberal circle condition: ratio < 0.22, isClosed, few sharp corners
-  if (circleRatio < 0.22 && closedEnoughForCircle && sharpCorners.length < 3) {
+    const isRectangular = angles.every((a) => a >= 68 && a <= 112);
     const aspect = width / height;
-    if (aspect >= 0.65 && aspect <= 1.55) {
-      // Roughly round → circle
-      const r = (width + height) / 4;
-      return {
-        shapeType: 'circle',
-        x: cx - r,
-        y: cy - r,
-        width: r * 2,
-        height: r * 2,
-      };
-    } else {
-      // Elongated → ellipse (still use 'circle' type but preserve aspect)
-      return {
-        shapeType: 'circle',
-        x: minX,
-        y: minY,
-        width: width,
-        height: height,
-      };
-    }
-  }
 
-  // E) Fallback for closed shapes:
-  if (isClosed) {
-    // If few corners and somewhat round → try circle as last resort
-    if (sharpCorners.length < 3 && circleRatio < 0.35) {
-      const r = (width + height) / 4;
+    // Kwadrat (Square): rectangular + aspect ratio roughly 1:1
+    if (isRectangular && aspect >= 0.82 && aspect <= 1.22) {
+      const size = Math.round((width + height) / 2);
       return {
-        shapeType: 'circle',
-        x: cx - r,
-        y: cy - r,
-        width: r * 2,
-        height: r * 2,
-      };
-    } else if (sharpCorners.length <= 3 && vCount <= 4) {
-      return {
-        shapeType: 'triangle',
-        x: minX,
-        y: minY,
-        width,
-        height,
+        shapeType: 'square',
+        x: cx - size / 2,
+        y: cy - size / 2,
+        width: size,
+        height: size,
         points: [
-          { x: minX + width / 2, y: minY },
-          { x: maxX, y: maxY },
-          { x: minX, y: maxY },
+          { x: cx - size / 2, y: cy - size / 2 },
+          { x: cx + size / 2, y: cy - size / 2 },
+          { x: cx + size / 2, y: cy + size / 2 },
+          { x: cx - size / 2, y: cy + size / 2 },
         ],
       };
-    } else {
+    }
+
+    // Prostokąt (Rectangle): rectangular angles
+    if (isRectangular) {
       return {
         shapeType: 'rectangle',
         x: minX,
         y: minY,
         width,
         height,
+        points: [
+          { x: minX, y: minY },
+          { x: maxX, y: minY },
+          { x: maxX, y: maxY },
+          { x: minX, y: maxY },
+        ],
+      };
+    }
+
+    // Romb (Diamond): vertices near midpoints of bounding box or all sides equal
+    const midX = minX + width / 2;
+    const midY = minY + height / 2;
+    let nearMidCount = 0;
+    for (const v of quad) {
+      if (Math.abs(v.x - midX) < width * 0.22 || Math.abs(v.y - midY) < height * 0.22) {
+        nearMidCount++;
+      }
+    }
+
+    if (nearMidCount >= 3) {
+      return {
+        shapeType: 'diamond',
+        x: minX,
+        y: minY,
+        width,
+        height,
+        points: [
+          { x: midX, y: minY },
+          { x: maxX, y: midY },
+          { x: midX, y: maxY },
+          { x: minX, y: midY },
+        ],
+      };
+    }
+
+    // Vectors of 4 sides: s0 (0->1), s1 (1->2), s2 (2->3), s3 (3->0)
+    const s0 = { x: quad[1].x - quad[0].x, y: quad[1].y - quad[0].y };
+    const s1 = { x: quad[2].x - quad[1].x, y: quad[2].y - quad[1].y };
+    const s2 = { x: quad[3].x - quad[2].x, y: quad[3].y - quad[2].y };
+    const s3 = { x: quad[0].x - quad[3].x, y: quad[0].y - quad[3].y };
+
+    const angleBetweenVectors = (v1: Point, v2: Point) => {
+      const mag1 = Math.hypot(v1.x, v1.y) || 1;
+      const mag2 = Math.hypot(v2.x, v2.y) || 1;
+      const dot = v1.x * v2.x + v1.y * v2.y;
+      const cos = Math.max(-1, Math.min(1, Math.abs(dot) / (mag1 * mag2)));
+      return Math.acos(cos) * (180 / Math.PI); // 0 = parallel, 90 = perpendicular
+    };
+
+    const s0_s2_parallel = angleBetweenVectors(s0, s2) < 22;
+    const s1_s3_parallel = angleBetweenVectors(s1, s3) < 22;
+
+    // Równoległobok (Parallelogram): both opposite pairs parallel
+    if (s0_s2_parallel && s1_s3_parallel) {
+      return {
+        shapeType: 'parallelogram',
+        x: minX,
+        y: minY,
+        width,
+        height,
+        points: quad,
+      };
+    }
+
+    // Trapez (Trapezoid): exactly ONE pair parallel
+    if (s0_s2_parallel || s1_s3_parallel) {
+      return {
+        shapeType: 'trapezoid',
+        x: minX,
+        y: minY,
+        width,
+        height,
+        points: quad,
+      };
+    }
+
+    // General 4-gon
+    return {
+      shapeType: 'polygon',
+      x: minX,
+      y: minY,
+      width,
+      height,
+      points: quad,
+    };
+  }
+
+  // C) GWIAZDA (Star): STRICT check — must have alternating inner/outer points!
+  if (sharpCorners.length >= 5 && sharpCorners.length <= 10) {
+    const dFromCenter = sharpCorners.map((p) => distance(p, { x: cx, y: cy }));
+    const maxR = Math.max(...dFromCenter);
+    const minR = Math.min(...dFromCenter);
+
+    // In a real hand-drawn star, ratio of min radius to max radius is <= 0.65
+    // AND points alternate significantly
+    if (minR / (maxR || 1) < 0.65) {
+      return {
+        shapeType: 'star',
+        x: minX,
+        y: minY,
+        width,
+        height,
+      };
+    }
+  }
+
+  // D) SZEŚCIOKĄT (Hexagon): exactly 6 corners
+  if (sharpCorners.length === 6 || vCount === 6) {
+    return {
+      shapeType: 'hexagon',
+      x: minX,
+      y: minY,
+      width,
+      height,
+      points: vertices.length >= 6 ? vertices.slice(0, 6) : undefined,
+    };
+  }
+
+  // E) INNY WIELOKĄT (General Polygon with 5+ corners)
+  if (isClosed && vertices.length >= 5) {
+    return {
+      shapeType: 'polygon',
+      x: minX,
+      y: minY,
+      width,
+      height,
+      points: vertices,
+    };
+  }
+
+  // F) FALLBACK FOR CLOSED SHAPES
+  if (isClosed) {
+    if (circleRatio < 0.35) {
+      const r = (width + height) / 4;
+      return {
+        shapeType: 'circle',
+        x: cx - r,
+        y: cy - r,
+        width: r * 2,
+        height: r * 2,
+      };
+    } else if (vCount <= 4) {
+      return {
+        shapeType: 'rectangle',
+        x: minX,
+        y: minY,
+        width,
+        height,
+        points: [
+          { x: minX, y: minY },
+          { x: maxX, y: minY },
+          { x: maxX, y: maxY },
+          { x: minX, y: maxY },
+        ],
+      };
+    } else {
+      return {
+        shapeType: 'polygon',
+        x: minX,
+        y: minY,
+        width,
+        height,
+        points: vertices,
       };
     }
   }

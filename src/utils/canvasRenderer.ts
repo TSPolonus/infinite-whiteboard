@@ -9,7 +9,18 @@ import type {
   Point,
 } from '../types';
 
-export type ResizeHandle = 'tl' | 'tr' | 'bl' | 'br' | 't' | 'b' | 'l' | 'r' | 'rotate';
+export type ResizeHandle =
+  | 'tl'
+  | 'tr'
+  | 'bl'
+  | 'br'
+  | 't'
+  | 'b'
+  | 'l'
+  | 'r'
+  | 'rotate'
+  | 'radius'
+  | string;
 
 export function screenToWorld(
   screenX: number,
@@ -139,6 +150,65 @@ export function drawStroke(
   ctx.restore();
 }
 
+export function getShapeVertices(shape: ShapeElement): Point[] | null {
+  if (shape.points && shape.points.length >= 3) {
+    return shape.points;
+  }
+  const { x, y, width, height, shapeType } = shape;
+  if (shapeType === 'triangle') {
+    return [
+      { x: x + width / 2, y },
+      { x: x + width, y: y + height },
+      { x, y: y + height },
+    ];
+  }
+  if (shapeType === 'rectangle' || shapeType === 'square') {
+    return [
+      { x, y },
+      { x: x + width, y },
+      { x: x + width, y: y + height },
+      { x, y: y + height },
+    ];
+  }
+  if (shapeType === 'diamond') {
+    return [
+      { x: x + width / 2, y },
+      { x: x + width, y: y + height / 2 },
+      { x: x + width / 2, y: y + height },
+      { x, y: y + height / 2 },
+    ];
+  }
+  if (shapeType === 'trapezoid') {
+    return [
+      { x: x + width * 0.2, y },
+      { x: x + width * 0.8, y },
+      { x: x + width, y: y + height },
+      { x, y: y + height },
+    ];
+  }
+  if (shapeType === 'parallelogram') {
+    return [
+      { x: x + width * 0.25, y },
+      { x: x + width, y },
+      { x: x + width * 0.75, y: y + height },
+      { x, y: y + height },
+    ];
+  }
+  if (shapeType === 'hexagon') {
+    const cx = x + width / 2;
+    const cy = y + height / 2;
+    const rx = Math.abs(width) / 2;
+    const ry = Math.abs(height) / 2;
+    const pts: Point[] = [];
+    for (let i = 0; i < 6; i++) {
+      const angle = (Math.PI / 3) * i - Math.PI / 6;
+      pts.push({ x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) });
+    }
+    return pts;
+  }
+  return null;
+}
+
 export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
   ctx.save();
   ctx.strokeStyle = shape.color;
@@ -160,16 +230,46 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
     ctx.translate(-cx, -cy);
   }
 
+  // If shape has custom polygon vertices (triangle, square, rect, trapezoid, parallelogram, polygon, etc.)
+  if (
+    shape.points &&
+    shape.points.length >= 3 &&
+    shapeType !== 'line' &&
+    shapeType !== 'arrow' &&
+    shapeType !== 'double_arrow' &&
+    shapeType !== 'circle' &&
+    shapeType !== 'ellipse'
+  ) {
+    ctx.beginPath();
+    ctx.moveTo(shape.points[0].x, shape.points[0].y);
+    for (let i = 1; i < shape.points.length; i++) {
+      ctx.lineTo(shape.points[i].x, shape.points[i].y);
+    }
+    ctx.closePath();
+    if (shape.fillColor) ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
   ctx.beginPath();
 
   switch (shapeType) {
+    case 'square': {
+      const size = Math.min(Math.abs(width), Math.abs(height));
+      ctx.rect(x, y, size, size);
+      if (shape.fillColor) ctx.fill();
+      ctx.stroke();
+      break;
+    }
     case 'rectangle': {
       ctx.rect(x, y, width, height);
       if (shape.fillColor) ctx.fill();
       ctx.stroke();
       break;
     }
-    case 'circle': {
+    case 'circle':
+    case 'ellipse': {
       ctx.beginPath();
       const rx = Math.abs(width) / 2;
       const ry = Math.abs(height) / 2;
@@ -204,6 +304,38 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
       ctx.closePath();
       if (shape.fillColor) ctx.fill();
       ctx.stroke();
+      break;
+    }
+    case 'trapezoid': {
+      ctx.moveTo(x + width * 0.2, y);
+      ctx.lineTo(x + width * 0.8, y);
+      ctx.lineTo(x + width, y + height);
+      ctx.lineTo(x, y + height);
+      ctx.closePath();
+      if (shape.fillColor) ctx.fill();
+      ctx.stroke();
+      break;
+    }
+    case 'parallelogram': {
+      ctx.moveTo(x + width * 0.25, y);
+      ctx.lineTo(x + width, y);
+      ctx.lineTo(x + width * 0.75, y + height);
+      ctx.lineTo(x, y + height);
+      ctx.closePath();
+      if (shape.fillColor) ctx.fill();
+      ctx.stroke();
+      break;
+    }
+    case 'polygon': {
+      if (shape.points && shape.points.length >= 3) {
+        ctx.moveTo(shape.points[0].x, shape.points[0].y);
+        for (let i = 1; i < shape.points.length; i++) {
+          ctx.lineTo(shape.points[i].x, shape.points[i].y);
+        }
+        ctx.closePath();
+        if (shape.fillColor) ctx.fill();
+        ctx.stroke();
+      }
       break;
     }
     case 'hexagon': {
@@ -362,7 +494,7 @@ const pixelCanvasCache = new Map<string, HTMLCanvasElement>();
 export function drawImageElement(
   ctx: CanvasRenderingContext2D,
   imgElem: ImageElement,
-  imageCache: Map<string, HTMLImageElement>
+  imageCache: Map<string, HTMLImageElement | HTMLCanvasElement>
 ) {
   ctx.save();
   const rotation = imgElem.rotation || 0;
@@ -372,6 +504,14 @@ export function drawImageElement(
     ctx.translate(cx, cy);
     ctx.rotate((rotation * Math.PI) / 180);
     ctx.translate(-cx, -cy);
+  }
+
+  // 1. Direct In-Memory HTMLCanvasElement (fastest, zero lag, immune to base64 decoding on tablets!)
+  const cachedSource = imageCache.get(imgElem.id);
+  if (cachedSource instanceof HTMLCanvasElement) {
+    ctx.drawImage(cachedSource, imgElem.x, imgElem.y, imgElem.width, imgElem.height);
+    ctx.restore();
+    return;
   }
 
   // 1. Pixel-by-pixel drawn image (100% data-safe, immune to WebRTC buffer & image loading issues)
@@ -452,7 +592,13 @@ export function drawImageElement(
       imageCache.set(imgElem.id, img);
     }
 
-    if (img.complete && img.naturalWidth > 0) {
+    if (img instanceof HTMLImageElement) {
+      if (img.complete && img.naturalWidth > 0) {
+        ctx.drawImage(img, imgElem.x, imgElem.y, imgElem.width, imgElem.height);
+        ctx.restore();
+        return;
+      }
+    } else if (img instanceof HTMLCanvasElement) {
       ctx.drawImage(img, imgElem.x, imgElem.y, imgElem.width, imgElem.height);
       ctx.restore();
       return;
@@ -674,6 +820,140 @@ export function drawSelectionBox(
   ctx.fill();
   ctx.stroke();
 
+  // SPECIAL INTERACTIVE HANDLES & ANNOTATIONS FOR SINGLE SHAPE
+  if (elements.length === 1 && elements[0].type === 'shape') {
+    const shape = elements[0] as ShapeElement;
+
+    // A) Okrąg: Interactive Radius Handle & Dimension Label
+    if (shape.shapeType === 'circle') {
+      const cx = shape.x + shape.width / 2;
+      const cy = shape.y + shape.height / 2;
+      const r = shape.width / 2;
+      const hx = cx + r;
+      const hy = cy;
+
+      // Radius line
+      ctx.beginPath();
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 1.5 / transform.scale;
+      ctx.setLineDash([3 / transform.scale, 3 / transform.scale]);
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(hx, hy);
+      ctx.stroke();
+
+      // Center point
+      ctx.beginPath();
+      ctx.setLineDash([]);
+      ctx.arc(cx, cy, 3.5 / transform.scale, 0, Math.PI * 2);
+      ctx.fillStyle = '#38bdf8';
+      ctx.fill();
+
+      // Interactive Radius Handle (punkt kontrolny promienia)
+      const radHandleSize = 8.5 / transform.scale;
+      ctx.beginPath();
+      ctx.arc(hx, hy, radHandleSize, 0, Math.PI * 2);
+      ctx.fillStyle = '#0284c7';
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2 / transform.scale;
+      ctx.stroke();
+
+      // Text "R" inside handle
+      ctx.font = `bold ${Math.max(8, Math.round(9 / transform.scale))}px sans-serif`;
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('R', hx, hy);
+
+      // Radius dimension badge above line
+      const badgeText = `R = ${Math.round(r)} px`;
+      const badgeX = cx + r / 2;
+      const badgeY = cy - 13 / transform.scale;
+      ctx.font = `bold ${Math.max(9, Math.round(11 / transform.scale))}px sans-serif`;
+      const textWidth = ctx.measureText(badgeText).width;
+      const padH = 5 / transform.scale;
+      const padV = 2.5 / transform.scale;
+
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.6)';
+      ctx.lineWidth = 1 / transform.scale;
+      ctx.beginPath();
+      ctx.rect(badgeX - textWidth / 2 - padH, badgeY - 7 / transform.scale - padV, textWidth + padH * 2, 14 / transform.scale + padV * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillText(badgeText, badgeX, badgeY);
+    }
+
+    // B) Wielokąty: Punkty zaczepu na każdy róg i informacje o kątach między bokami!
+    const vertices = getShapeVertices(shape);
+    if (vertices && vertices.length >= 3 && shape.shapeType !== 'circle' && shape.shapeType !== 'ellipse') {
+      const N = vertices.length;
+      const handleR = 7.5 / transform.scale;
+
+      for (let i = 0; i < N; i++) {
+        const pCurr = vertices[i];
+        const pPrev = vertices[(i - 1 + N) % N];
+        const pNext = vertices[(i + 1) % N];
+
+        // Oblicz kąt przy tym wierzchołku
+        const a1 = Math.atan2(pPrev.y - pCurr.y, pPrev.x - pCurr.x);
+        const a2 = Math.atan2(pNext.y - pCurr.y, pNext.x - pCurr.x);
+        let angleDeg = Math.round(Math.abs(a1 - a2) * (180 / Math.PI));
+        if (angleDeg > 180) angleDeg = 360 - angleDeg;
+
+        // Łuk kąta przy narożniku
+        const arcR = 15 / transform.scale;
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.7)';
+        ctx.lineWidth = 1.5 / transform.scale;
+        ctx.setLineDash([2 / transform.scale, 2 / transform.scale]);
+        ctx.arc(pCurr.x, pCurr.y, arcR, Math.min(a1, a2), Math.max(a1, a2));
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Etykieta kąta w stopniach (np. 90°, 60°, 120°)
+        const angleText = `${angleDeg}°`;
+        ctx.font = `bold ${Math.max(9, Math.round(10 / transform.scale))}px sans-serif`;
+        const tWidth = ctx.measureText(angleText).width;
+
+        let bisect = (a1 + a2) / 2;
+        if (Math.abs(a1 - a2) > Math.PI) bisect += Math.PI;
+        const badgeDist = 24 / transform.scale;
+        const bx = pCurr.x + Math.cos(bisect) * badgeDist;
+        const by = pCurr.y + Math.sin(bisect) * badgeDist;
+
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.6)';
+        ctx.lineWidth = 1 / transform.scale;
+        ctx.beginPath();
+        ctx.rect(bx - tWidth / 2 - 3 / transform.scale, by - 6 / transform.scale, tWidth + 6 / transform.scale, 13 / transform.scale);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#38bdf8';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(angleText, bx, by);
+
+        // Punkt zaczepu na róg (Corner Anchor Point)
+        ctx.beginPath();
+        ctx.arc(pCurr.x, pCurr.y, handleR, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.strokeStyle = '#0284c7';
+        ctx.lineWidth = 2.5 / transform.scale;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(pCurr.x, pCurr.y, handleR * 0.45, 0, Math.PI * 2);
+        ctx.fillStyle = '#38bdf8';
+        ctx.fill();
+      }
+    }
+  }
+
   ctx.restore();
 }
 
@@ -703,6 +983,31 @@ export function getHandleAtPoint(
   elements: CanvasElement[],
   transform: ViewportTransform
 ): ResizeHandle | null {
+  const threshold = 16 / transform.scale;
+
+  // 1. Sprawdź punkt zaczepu promienia dla pojedynczego okręgu
+  if (elements.length === 1 && elements[0].type === 'shape') {
+    const shape = elements[0] as ShapeElement;
+    if (shape.shapeType === 'circle') {
+      const cx = shape.x + shape.width / 2;
+      const cy = shape.y + shape.height / 2;
+      const r = shape.width / 2;
+      if (Math.hypot(worldPos.x - (cx + r), worldPos.y - cy) <= threshold * 1.35) {
+        return 'radius';
+      }
+    }
+
+    // 2. Sprawdź punkty zaczepu na rogi dla wielokątów
+    const vertices = getShapeVertices(shape);
+    if (vertices && vertices.length >= 3 && shape.shapeType !== 'circle' && shape.shapeType !== 'ellipse') {
+      for (let i = 0; i < vertices.length; i++) {
+        if (Math.hypot(worldPos.x - vertices[i].x, worldPos.y - vertices[i].y) <= threshold * 1.35) {
+          return `vertex_${i}`;
+        }
+      }
+    }
+  }
+
   const bbox = getCombinedBBox(elements);
   if (!bbox) return null;
 
@@ -711,7 +1016,6 @@ export function getHandleAtPoint(
   const y = bbox.minY - pad;
   const w = bbox.maxX - bbox.minX + pad * 2;
   const h = bbox.maxY - bbox.minY + pad * 2;
-  const threshold = 16 / transform.scale;
 
   let testPos = worldPos;
   const rotation = elements.length === 1 ? (elements[0] as any).rotation || 0 : 0;

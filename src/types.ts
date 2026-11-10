@@ -2,12 +2,17 @@ export type Tool = 'select' | 'pen' | 'highlighter' | 'eraser' | 'laser' | 'hand
 
 export type ShapeType =
   | 'rectangle'
+  | 'square'
   | 'circle'
+  | 'ellipse'
   | 'triangle'
+  | 'diamond'
+  | 'trapezoid'
+  | 'parallelogram'
+  | 'polygon'
   | 'line'
   | 'arrow'
   | 'double_arrow'
-  | 'diamond'
   | 'star'
   | 'hexagon'
   | 'heart'

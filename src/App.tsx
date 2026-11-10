@@ -27,6 +27,7 @@ import {
   isElementInsideBox,
   getCombinedBBox,
   getHandleAtPoint,
+  getShapeVertices,
   eraseStrokePixels,
 } from './utils/canvasRenderer';
 import type { ResizeHandle } from './utils/canvasRenderer';
@@ -36,6 +37,7 @@ import { Toolbar } from './components/Toolbar';
 import { ShareModal } from './components/ShareModal';
 import { SettingsModal } from './components/SettingsModal';
 import { PasswordPromptModal } from './components/PasswordPromptModal';
+import { IosGuideModal } from './components/IosGuideModal';
 
 export const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -122,12 +124,16 @@ export const App: React.FC = () => {
   const holdTimerRef = useRef<number | null>(null);
   const lastAnchorRef = useRef<Point | null>(null);
 
-  // Multi-touch gestures
+  // Multi-touch gestures & Two-finger double-tap to undo (iOS/iPad Procreate style)
   const activePointers = useRef<Map<number, Point>>(new Map());
   const initialPinchDist = useRef<number | null>(null);
   const initialScale = useRef<number>(1);
   const isSpacePressed = useRef<boolean>(false);
   const isRightClickPanning = useRef<boolean>(false);
+  const twoFingerDownTime = useRef<number>(0);
+  const twoFingerStartPos = useRef<{ p1: Point; p2: Point } | null>(null);
+  const twoFingerMoved = useRef<boolean>(false);
+  const lastTwoFingerTapTime = useRef<number>(0);
 
   // Laser trails
   const laserTrailsRef = useRef<LaserPoint[]>([]);
@@ -143,17 +149,24 @@ export const App: React.FC = () => {
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
+  const [isIosGuideModalOpen, setIsIosGuideModalOpen] = useState(false);
   const [passwordErrorMessage, setPasswordErrorMessage] = useState<string>('');
 
   // Image cache
-  const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const imageCacheRef = useRef<Map<string, HTMLImageElement | HTMLCanvasElement>>(new Map());
+
+  // Always keep ref up-to-date with current elements & settings to avoid stale closures in WebRTC callbacks
+  const elementsRef = useRef<CanvasElement[]>(elements);
+  elementsRef.current = elements;
+  const boardSettingsRef = useRef<BoardSettings>(boardSettings);
+  boardSettingsRef.current = boardSettings;
 
   // History push helper
   const pushToHistory = useCallback((newElements: CanvasElement[]) => {
-    setHistory((prev) => [...prev.slice(-30), elements]);
+    setHistory((prev) => [...prev.slice(-30), elementsRef.current]);
     setRedoStack([]);
     setElements(newElements);
-  }, [elements]);
+  }, []);
 
   // Undo / Redo
   const handleUndo = useCallback(() => {
@@ -193,7 +206,7 @@ export const App: React.FC = () => {
     const netManager = new BoardNetworkManager(
       {
         onElementAdd: (el) => {
-          setElements((prev) => [...prev, el]);
+          setElements((prev) => [...prev.filter((e) => e.id !== el.id), el]);
         },
         onElementUpdate: (el) => {
           setElements((prev) => prev.map((e) => (e.id === el.id ? el : e)));
@@ -202,9 +215,19 @@ export const App: React.FC = () => {
           setElements((prev) => prev.filter((e) => e.id !== id));
         },
         onBoardSync: (syncElements, syncSettings) => {
-          setElements(syncElements);
+          // Ochrona przed skasowaniem lokalnie wgranego zdjęcia przy reconnect z galerii tableta:
+          const localRecent = elementsRef.current.filter(
+            (el) => !syncElements.some((s) => s.id === el.id) && (Date.now() - el.timestamp < 30000 || el.type === 'image')
+          );
+          const merged = [...syncElements, ...localRecent];
+          setElements(merged);
           if (syncSettings) setBoardSettings(syncSettings);
           setIsPasswordModalOpen(false);
+
+          // Jeśli klient ma lokalnie świeży element (np. obraz), którego host nie miał, doślij go
+          for (const missing of localRecent) {
+            netManager.broadcast({ type: 'element_add', element: missing });
+          }
         },
         onLaserStroke: (points) => {
           laserTrailsRef.current.push(...points);
@@ -251,14 +274,14 @@ export const App: React.FC = () => {
         },
       },
       () => ({
-        elements,
-        settings: boardSettings,
+        elements: elementsRef.current,
+        settings: boardSettingsRef.current,
       })
     );
 
     networkManagerRef.current = netManager;
     netManager.connect(code, password);
-  }, [elements, boardSettings]);
+  }, []);
 
   useEffect(() => {
     initNetworking(boardSettings.roomCode);
@@ -277,6 +300,19 @@ export const App: React.FC = () => {
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [boardSettings.roomCode]);
+
+  // Pełne wsparcie gestów iOS & iPadOS (zapobiega domyślnemu zoomowi całej strony w Safari)
+  useEffect(() => {
+    const preventGesture = (e: Event) => e.preventDefault();
+    document.addEventListener('gesturestart', preventGesture, { passive: false });
+    document.addEventListener('gesturechange', preventGesture, { passive: false });
+    document.addEventListener('gestureend', preventGesture, { passive: false });
+    return () => {
+      document.removeEventListener('gesturestart', preventGesture);
+      document.removeEventListener('gesturechange', preventGesture);
+      document.removeEventListener('gestureend', preventGesture);
+    };
+  }, []);
 
   // Join Room by Code
   const handleJoinRoomByCode = (newCode: string) => {
@@ -545,11 +581,14 @@ export const App: React.FC = () => {
       return;
     }
 
-    // 2. Multi-touch gesture (Pinch-to-zoom / Two-finger pan)
+    // 2. Multi-touch gesture (Pinch-to-zoom / Two-finger pan & Double-tap to undo)
     if (activePointers.current.size === 2) {
       const pts = Array.from(activePointers.current.values());
       initialPinchDist.current = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       initialScale.current = transform.scale;
+      twoFingerDownTime.current = Date.now();
+      twoFingerStartPos.current = { p1: pts[0], p2: pts[1] };
+      twoFingerMoved.current = false;
       setIsDrawing(false);
       setIsMarqueeSelecting(false);
       setMarqueeBox(null);
@@ -719,6 +758,16 @@ export const App: React.FC = () => {
     // Multi-touch pinch & pan
     if (activePointers.current.size === 2 && initialPinchDist.current !== null) {
       const pts = Array.from(activePointers.current.values());
+
+      // Sprawdź czy palce się przesunęły (odróżnienie gestu powiększania od stuknięcia)
+      if (twoFingerStartPos.current) {
+        const d1 = Math.hypot(pts[0].x - twoFingerStartPos.current.p1.x, pts[0].y - twoFingerStartPos.current.p1.y);
+        const d2 = Math.hypot(pts[1].x - twoFingerStartPos.current.p2.x, pts[1].y - twoFingerStartPos.current.p2.y);
+        if (d1 > 15 || d2 > 15) {
+          twoFingerMoved.current = true;
+        }
+      }
+
       const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       const factor = currentDist / initialPinchDist.current;
       const newScale = Math.min(6, Math.max(0.12, initialScale.current * factor));
@@ -751,7 +800,7 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Rescaling / Free Rotating all selected elements
+    // Rescaling / Free Rotating / Vertex Dragging / Radius Changing
     if (currentTool === 'select' && selectedElementIds.length > 0 && activeResizeHandle && dragStart && initialBBox) {
       const dx = worldPos.x - dragStart.x;
       const dy = worldPos.y - dragStart.y;
@@ -769,6 +818,44 @@ export const App: React.FC = () => {
             if (deg < 0) deg += 360;
             setActiveRotationAngle(deg);
             return { ...el, rotation: deg };
+          }
+
+          // Interactive Circle Radius Dragging
+          if (activeResizeHandle === 'radius' && el.type === 'shape') {
+            const cx = initialBBox.x + initialBBox.width / 2;
+            const cy = initialBBox.y + initialBBox.height / 2;
+            const newRadius = Math.max(8, Math.round(Math.hypot(worldPos.x - cx, worldPos.y - cy)));
+            return {
+              ...el,
+              x: cx - newRadius,
+              y: cy - newRadius,
+              width: newRadius * 2,
+              height: newRadius * 2,
+            };
+          }
+
+          // Interactive Polygon Vertex / Corner Dragging
+          if (activeResizeHandle.startsWith('vertex_') && el.type === 'shape') {
+            const vIdx = parseInt(activeResizeHandle.split('_')[1], 10);
+            const vertices = el.points ? [...el.points] : getShapeVertices(el) ? [...getShapeVertices(el)!] : null;
+            if (vertices && vIdx >= 0 && vIdx < vertices.length) {
+              vertices[vIdx] = { x: worldPos.x, y: worldPos.y };
+              let vMinX = Infinity, vMinY = Infinity, vMaxX = -Infinity, vMaxY = -Infinity;
+              for (const p of vertices) {
+                if (p.x < vMinX) vMinX = p.x;
+                if (p.x > vMaxX) vMaxX = p.x;
+                if (p.y < vMinY) vMinY = p.y;
+                if (p.y > vMaxY) vMaxY = p.y;
+              }
+              return {
+                ...el,
+                points: vertices,
+                x: vMinX,
+                y: vMinY,
+                width: Math.max(10, vMaxX - vMinX),
+                height: Math.max(10, vMaxY - vMinY),
+              };
+            }
           }
 
           if (el.type === 'shape' || el.type === 'image') {
@@ -963,6 +1050,21 @@ export const App: React.FC = () => {
     try {
       (e.target as HTMLElement).releasePointerCapture(e.pointerId);
     } catch (err) {}
+
+    // Wykrywanie dwukrotnego stuknięcia dwoma palcami (Two-finger double-tap to undo - styl Procreate)
+    if (activePointers.current.size === 2) {
+      const duration = Date.now() - twoFingerDownTime.current;
+      if (!twoFingerMoved.current && duration < 320) {
+        const now = Date.now();
+        if (now - lastTwoFingerTapTime.current < 450) {
+          handleUndo();
+          showToastRef.current('↩️ Cofnięto (gest 2 palców)');
+          lastTwoFingerTapTime.current = 0;
+        } else {
+          lastTwoFingerTapTime.current = now;
+        }
+      }
+    }
 
     activePointers.current.delete(e.pointerId);
     if (activePointers.current.size < 2) {
@@ -1198,6 +1300,26 @@ export const App: React.FC = () => {
     pushToHistory([...selected, ...unselected]);
   };
 
+  const handleSetCircleRadius = (newRadius: number) => {
+    if (selectedElementIds.length === 0) return;
+    const targetId = selectedElementIds[0];
+    const target = elements.find((el) => el.id === targetId);
+    if (!target || target.type !== 'shape' || target.shapeType !== 'circle') return;
+
+    const cx = target.x + target.width / 2;
+    const cy = target.y + target.height / 2;
+    const r = Math.max(5, Math.min(5000, newRadius));
+    const updated: ShapeElement = {
+      ...target,
+      x: cx - r,
+      y: cy - r,
+      width: r * 2,
+      height: r * 2,
+    };
+    pushToHistory(elements.map((e) => (e.id === targetId ? updated : e)));
+    networkManagerRef.current?.broadcast({ type: 'element_update', element: updated });
+  };
+
   // Universal high-definition image loader (minimum 720p HD)
   // Handles native mobile camera formats, EXIF, and prevents WebRTC disconnects
   const handleImageUpload = async (file: File) => {
@@ -1314,25 +1436,20 @@ export const App: React.FC = () => {
         timestamp: Date.now(),
       };
 
-      const cached = new Image();
-      cached.src = compressedData;
-      imageCacheRef.current.set(imgElement.id, cached);
+      // 1. Zapisz w pamięci natywny canvas z wyrenderowanym obrazem (natychmiastowe wyświetlenie na tablecie bez dekodowania base64)
+      imageCacheRef.current.set(imgElement.id, hdCanvas as any);
 
-      pushToHistory([...elements, imgElement]);
+      // 2. Dodaj element do tablicy lokalnie
+      pushToHistory([...elementsRef.current.filter((e) => e.id !== imgElement.id), imgElement]);
       setSelectedElementIds([imgElement.id]);
 
-      // Broadcast smoothly to lobby
-      // Na tablecie po wyborze pliku przeglądarka wraca z galerii/aparatu — karta mogła być
-      // w tle, więc WebRTC DataChannel może być "uśpiony". Dodajemy opóźnienie 600ms,
-      // żeby przeglądarka zdążyła przywrócić połączenie, a następnie broadcastujemy.
+      // 3. Rozgłoś do lobby
       const broadcastImage = () => {
         networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
       };
       if (networkManagerRef.current && networkManagerRef.current.getConnectedCount() > 1) {
-        // Jesteśmy w lobby — dajemy przeglądarce czas na "obudzenie" połączenia
-        setTimeout(broadcastImage, 600);
+        setTimeout(broadcastImage, 500);
       } else {
-        // Solo mode — broadcastuj od razu (nikt nie słucha, ale nie szkodzi)
         broadcastImage();
       }
       showToastRef.current('✅ Zdjęcie HD dodane!');
@@ -1496,6 +1613,7 @@ export const App: React.FC = () => {
         boardSettings={boardSettings}
         connectedCount={connectedCount}
         selectedElementId={selectedElementIds.length > 0 ? selectedElementIds[0] : null}
+        selectedElement={selectedElementIds.length === 1 ? elements.find((e) => e.id === selectedElementIds[0]) || null : null}
         onToolChange={setCurrentTool}
         onShapeChange={setCurrentShape}
         onUpdateToolSetting={updateToolSetting}
@@ -1517,6 +1635,8 @@ export const App: React.FC = () => {
         onDeleteSelected={handleDeleteSelected}
         onBringToFront={handleBringToFront}
         onSendToBack={handleSendToBack}
+        onUpdateCircleRadius={handleSetCircleRadius}
+        onOpenIosGuide={() => setIsIosGuideModalOpen(true)}
       />
 
       <ShareModal
@@ -1536,6 +1656,7 @@ export const App: React.FC = () => {
         onReconnect={() => initNetworking(boardSettings.roomCode)}
         onLeaveLobby={handleLeaveLobby}
         onCreateNewLobby={handleCreateNewLobby}
+        onOpenIosGuide={() => setIsIosGuideModalOpen(true)}
       />
 
       <SettingsModal
@@ -1547,6 +1668,12 @@ export const App: React.FC = () => {
         onExportSVG={handleExportSVG}
         onExportJSON={handleExportJSON}
         onImportJSON={handleImportJSON}
+      />
+
+      <IosGuideModal
+        isOpen={isIosGuideModalOpen}
+        onClose={() => setIsIosGuideModalOpen(false)}
+        roomCode={boardSettings.roomCode}
       />
 
       <PasswordPromptModal
