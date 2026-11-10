@@ -66,7 +66,6 @@ interface ToolbarProps {
   onBringToFront: () => void;
   onSendToBack: () => void;
   onUpdateCircleRadius?: (radius: number) => void;
-  onOpenIosGuide?: () => void;
 }
 
 const PEN_COLORS = [
@@ -149,7 +148,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onBringToFront,
   onSendToBack,
   onUpdateCircleRadius,
-  onOpenIosGuide,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showSubMenu, setShowSubMenu] = useState<Tool | null>('pen');
@@ -310,24 +308,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           >
             <Share2 size={15} />
             <span className="hidden-mobile">Lobby / Kod</span>
-          </button>
-
-          <button
-            className="glass-btn"
-            onClick={onOpenIosGuide}
-            title="Instrukcja dla tabletu Apple (iPad / iOS) i dodawanie do pulpitu"
-            style={{
-              padding: '6px 10px',
-              gap: 5,
-              background: 'rgba(168, 85, 247, 0.15)',
-              border: '1px solid rgba(168, 85, 247, 0.3)',
-              color: '#c084fc',
-              fontWeight: 600,
-              fontSize: 12,
-            }}
-          >
-            <span>🍎</span>
-            <span className="hidden-mobile">iPad / iOS</span>
           </button>
 
           <button

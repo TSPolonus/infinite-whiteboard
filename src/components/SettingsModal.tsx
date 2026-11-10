@@ -317,6 +317,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </ul>
           </div>
         </div>
+
+        {/* Numer wersji aplikacji w lewym dolnym rogu */}
+        <div
+          style={{
+            marginTop: 18,
+            paddingTop: 12,
+            borderTop: '1px solid rgba(255, 255, 255, 0.1)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
+          <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 600 }}>
+            Wersja: v2.5.0
+          </span>
+          <span style={{ fontSize: 11, color: '#475569' }}>
+            InfinityDraw
+          </span>
+        </div>
       </div>
     </div>
   );

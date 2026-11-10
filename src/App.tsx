@@ -37,7 +37,6 @@ import { Toolbar } from './components/Toolbar';
 import { ShareModal } from './components/ShareModal';
 import { SettingsModal } from './components/SettingsModal';
 import { PasswordPromptModal } from './components/PasswordPromptModal';
-import { IosGuideModal } from './components/IosGuideModal';
 
 export const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -149,22 +148,22 @@ export const App: React.FC = () => {
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
-  const [isIosGuideModalOpen, setIsIosGuideModalOpen] = useState(false);
   const [passwordErrorMessage, setPasswordErrorMessage] = useState<string>('');
 
   // Image cache
   const imageCacheRef = useRef<Map<string, HTMLImageElement | HTMLCanvasElement>>(new Map());
 
-  // Always keep ref up-to-date with current elements & settings to avoid stale closures in WebRTC callbacks
+  // Always keep ref up-to-date with current elements & settings to avoid stale closures in callbacks
   const elementsRef = useRef<CanvasElement[]>(elements);
   elementsRef.current = elements;
   const boardSettingsRef = useRef<BoardSettings>(boardSettings);
   boardSettingsRef.current = boardSettings;
 
-  // History push helper
+  // History push helper (synchronous ref update prevents missing consecutive strokes)
   const pushToHistory = useCallback((newElements: CanvasElement[]) => {
     setHistory((prev) => [...prev.slice(-30), elementsRef.current]);
     setRedoStack([]);
+    elementsRef.current = newElements;
     setElements(newElements);
   }, []);
 
@@ -206,13 +205,26 @@ export const App: React.FC = () => {
     const netManager = new BoardNetworkManager(
       {
         onElementAdd: (el) => {
-          setElements((prev) => [...prev.filter((e) => e.id !== el.id), el]);
+          setElements((prev) => {
+            if (prev.some((e) => e.id === el.id)) return prev;
+            const next = [...prev, el];
+            elementsRef.current = next;
+            return next;
+          });
         },
         onElementUpdate: (el) => {
-          setElements((prev) => prev.map((e) => (e.id === el.id ? el : e)));
+          setElements((prev) => {
+            const next = prev.map((e) => (e.id === el.id ? el : e));
+            elementsRef.current = next;
+            return next;
+          });
         },
         onElementDelete: (id) => {
-          setElements((prev) => prev.filter((e) => e.id !== id));
+          setElements((prev) => {
+            const next = prev.filter((e) => e.id !== id);
+            elementsRef.current = next;
+            return next;
+          });
         },
         onBoardSync: (syncElements, syncSettings) => {
           // Ochrona przed skasowaniem lokalnie wgranego zdjęcia przy reconnect z galerii tableta:
@@ -220,6 +232,7 @@ export const App: React.FC = () => {
             (el) => !syncElements.some((s) => s.id === el.id) && (Date.now() - el.timestamp < 30000 || el.type === 'image')
           );
           const merged = [...syncElements, ...localRecent];
+          elementsRef.current = merged;
           setElements(merged);
           if (syncSettings) setBoardSettings(syncSettings);
           setIsPasswordModalOpen(false);
@@ -732,9 +745,9 @@ export const App: React.FC = () => {
       activePointers.current.set(e.pointerId, screenPos);
     }
 
-    // Broadcast cursor position
+    // Broadcast cursor position (optymalizacja częstotliwości do max 8/sek, aby nie blokować pasma dla rysowania)
     const now = Date.now();
-    if (now - lastLaserBroadcastRef.current > 60) {
+    if (now - lastLaserBroadcastRef.current > 120) {
       lastLaserBroadcastRef.current = now;
       networkManagerRef.current?.broadcast({
         type: 'cursor_move',
@@ -742,8 +755,8 @@ export const App: React.FC = () => {
           userId: networkManagerRef.current?.getUserId() || 'me',
           userName: 'Użytkownik',
           color: toolSettings.pen.color,
-          x: worldPos.x,
-          y: worldPos.y,
+          x: Math.round(worldPos.x),
+          y: Math.round(worldPos.y),
           lastActive: now,
         },
       });
@@ -968,7 +981,20 @@ export const App: React.FC = () => {
 
     // Freehand stroke / shape drawing
     if (isDrawing) {
-      setCurrentStroke((prev) => [...prev, worldPos]);
+      setCurrentStroke((prev) => {
+        if (prev.length > 0) {
+          const last = prev[prev.length - 1];
+          // Deadband filter: pomijaj mikroskopijne drgania < 1.2px
+          if (Math.hypot(worldPos.x - last.x, worldPos.y - last.y) < 1.2) {
+            return prev;
+          }
+        }
+        const cleanPt = {
+          x: Math.round(worldPos.x * 10) / 10,
+          y: Math.round(worldPos.y * 10) / 10,
+        };
+        return [...prev, cleanPt];
+      });
 
       if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
         if (lastAnchorRef.current) {
@@ -1128,7 +1154,7 @@ export const App: React.FC = () => {
     }
 
     if (snappedShape) {
-      pushToHistory([...elements, snappedShape]);
+      pushToHistory([...elementsRef.current.filter((e) => e.id !== snappedShape.id), snappedShape]);
       networkManagerRef.current?.broadcast({ type: 'element_add', element: snappedShape });
       setSnappedShape(null);
       setCurrentStroke([]);
@@ -1151,7 +1177,7 @@ export const App: React.FC = () => {
         strokeWidth: toolSettings.shape.size,
         timestamp: Date.now(),
       };
-      pushToHistory([...elements, newShape]);
+      pushToHistory([...elementsRef.current.filter((e) => e.id !== newShape.id), newShape]);
       networkManagerRef.current?.broadcast({ type: 'element_add', element: newShape });
       setCurrentStroke([]);
       return;
@@ -1170,7 +1196,7 @@ export const App: React.FC = () => {
         opacity: currentTool === 'highlighter' ? 0.40 : 1,
         timestamp: Date.now(),
       };
-      pushToHistory([...elements, newStroke]);
+      pushToHistory([...elementsRef.current.filter((e) => e.id !== newStroke.id), newStroke]);
       networkManagerRef.current?.broadcast({ type: 'element_add', element: newStroke });
       setCurrentStroke([]);
     }
@@ -1626,7 +1652,6 @@ export const App: React.FC = () => {
         onBringToFront={handleBringToFront}
         onSendToBack={handleSendToBack}
         onUpdateCircleRadius={handleSetCircleRadius}
-        onOpenIosGuide={() => setIsIosGuideModalOpen(true)}
       />
 
       <ShareModal
@@ -1646,7 +1671,6 @@ export const App: React.FC = () => {
         onReconnect={() => initNetworking(boardSettings.roomCode)}
         onLeaveLobby={handleLeaveLobby}
         onCreateNewLobby={handleCreateNewLobby}
-        onOpenIosGuide={() => setIsIosGuideModalOpen(true)}
       />
 
       <SettingsModal
@@ -1658,12 +1682,6 @@ export const App: React.FC = () => {
         onExportSVG={handleExportSVG}
         onExportJSON={handleExportJSON}
         onImportJSON={handleImportJSON}
-      />
-
-      <IosGuideModal
-        isOpen={isIosGuideModalOpen}
-        onClose={() => setIsIosGuideModalOpen(false)}
-        roomCode={boardSettings.roomCode}
       />
 
       <PasswordPromptModal
