@@ -86,9 +86,6 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
   const pn = points[points.length - 1];
   const startEndDist = distance(p0, pn);
 
-  // Closed threshold: start is close to end
-  const isClosed = startEndDist < Math.max(55, totalLen * 0.38);
-
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   let sumX = 0, sumY = 0;
   for (const p of points) {
@@ -105,6 +102,9 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
   const bboxDiagonal = Math.sqrt(width * width + height * height);
   const cx = sumX / points.length;
   const cy = sumY / points.length;
+
+  // Closed threshold: start is close to end
+  const isClosed = startEndDist < Math.max(50, bboxDiagonal * 0.38, totalLen * 0.32);
 
   // 2. OPEN PATH: Straight Line or Arrow
   if (!isClosed) {
@@ -124,56 +124,49 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
         points: [p0, pn],
       };
     }
-  }
 
-  // 3. CIRCLE & ELLIPSE DETECTION (PRIORITY #1 TO PREVENT DETECTING AS STAR/HEXAGON)
-  // Calculate variance of distance from centroid to boundary points
-  const radii = points.map((p) => distance(p, { x: cx, y: cy }));
-  const avgRadius = radii.reduce((acc, r) => acc + r, 0) / radii.length;
-  const radiusVariance = radii.reduce((acc, r) => acc + Math.abs(r - avgRadius), 0) / radii.length;
-  const circleRatio = radiusVariance / (avgRadius || 1);
-
-  if (isClosed && circleRatio < 0.28) {
-    const aspect = width / height;
-    if (aspect >= 0.75 && aspect <= 1.33) {
-      // Okrąg (circle)
-      const r = (width + height) / 4;
-      return {
-        shapeType: 'circle',
-        x: cx - r,
-        y: cy - r,
-        width: r * 2,
-        height: r * 2,
-      };
-    } else {
-      // Owal / Elipsa (ellipse)
-      return {
-        shapeType: 'ellipse',
-        x: minX,
-        y: minY,
-        width: width,
-        height: height,
-      };
+    // Check for arrow tip
+    const simp = rdp(points, bboxDiagonal * 0.08);
+    if (simp.length >= 3 && simp.length <= 6) {
+      const pStemStart = simp[0];
+      const pTip = simp[simp.length - 2];
+      const pWing = simp[simp.length - 1];
+      const stemDist = distance(pStemStart, pTip);
+      const wingDist = distance(pTip, pWing);
+      if (stemDist > wingDist * 1.5 && wingDist < bboxDiagonal * 0.45) {
+        return {
+          shapeType: 'arrow',
+          x: pStemStart.x,
+          y: pStemStart.y,
+          width: pTip.x - pStemStart.x,
+          height: pTip.y - pStemStart.y,
+          points: [pStemStart, pTip],
+        };
+      }
     }
+
+    return null;
   }
 
-  // 4. CORNER DETECTION VIA RDP SIMPLIFICATION
-  const simplified = rdp(points, bboxDiagonal * 0.075);
+  // 3. CORNER DETECTION VIA ADAPTIVE RDP SIMPLIFICATION
+  const epsilon = Math.max(9, bboxDiagonal * 0.068);
+  const simplified = rdp(points, epsilon);
 
   // Clean vertices that are too close to each other
   const vertices: Point[] = [simplified[0]];
   for (let i = 1; i < simplified.length; i++) {
-    if (distance(simplified[i], vertices[vertices.length - 1]) > bboxDiagonal * 0.08) {
+    if (distance(simplified[i], vertices[vertices.length - 1]) > bboxDiagonal * 0.085) {
       vertices.push(simplified[i]);
     }
   }
+
   // If last vertex is close to first, merge
-  if (vertices.length > 3 && distance(vertices[0], vertices[vertices.length - 1]) < bboxDiagonal * 0.15) {
+  if (vertices.length > 2 && distance(vertices[0], vertices[vertices.length - 1]) < bboxDiagonal * 0.15) {
     vertices.pop();
   }
 
-  // Count sharp corners (angle < 145 deg)
-  const sharpCorners: Point[] = [];
+  // Count sharp corners (angle < 128 deg)
+  const sharpCorners: { pt: Point; angle: number; index: number }[] = [];
   const vCount = vertices.length;
   if (vCount >= 3) {
     for (let i = 0; i < vCount; i++) {
@@ -181,15 +174,15 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
       const pCurr = vertices[i];
       const pNext = vertices[(i + 1) % vCount];
       const angle = getVertexAngle(pPrev, pCurr, pNext);
-      if (angle < 145) {
-        sharpCorners.push(pCurr);
+      if (angle < 128) {
+        sharpCorners.push({ pt: pCurr, angle, index: i });
       }
     }
   }
 
-  // A) TRÓJKĄT (Triangle): 3 corners or 3 simplified vertices
+  // 4. TRÓJKĄT (TRIANGLE): Exactly 3 sharp corners or 3 simplified vertices
   if (sharpCorners.length === 3 || (vCount === 3 && isClosed)) {
-    const triPoints = sharpCorners.length === 3 ? sharpCorners : vertices.slice(0, 3);
+    const triPoints = sharpCorners.length === 3 ? sharpCorners.map((c) => c.pt) : vertices.slice(0, 3);
     return {
       shapeType: 'triangle',
       x: minX,
@@ -200,9 +193,9 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
     };
   }
 
-  // B) CZWOROKĄTY (Quadrilaterals: Kwadrat, Prostokąt, Romb, Trapez, Równoległobok, Wielokąt)
+  // 5. CZWOROKĄTY (QUADRILATERALS: Kwadrat, Prostokąt, Romb, Trapez, Równoległobok)
   if (sharpCorners.length === 4 || (vCount === 4 && isClosed)) {
-    const quad = sharpCorners.length === 4 ? sharpCorners : vertices.slice(0, 4);
+    const quad = sharpCorners.length === 4 ? sharpCorners.map((c) => c.pt) : vertices.slice(0, 4);
 
     // Compute 4 corner angles
     const angles = quad.map((curr, idx) => {
@@ -211,11 +204,11 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
       return getVertexAngle(prev, curr, next);
     });
 
-    const isRectangular = angles.every((a) => a >= 68 && a <= 112);
+    const isRectangular = angles.every((a) => a >= 65 && a <= 115);
     const aspect = width / height;
 
     // Kwadrat (Square): rectangular + aspect ratio roughly 1:1
-    if (isRectangular && aspect >= 0.82 && aspect <= 1.22) {
+    if (isRectangular && aspect >= 0.80 && aspect <= 1.25) {
       const size = Math.round((width + height) / 2);
       return {
         shapeType: 'square',
@@ -249,7 +242,7 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
       };
     }
 
-    // Romb (Diamond): vertices near midpoints of bounding box or all sides equal
+    // Romb (Diamond): vertices near midpoints of bounding box
     const midX = minX + width / 2;
     const midY = minY + height / 2;
     let nearMidCount = 0;
@@ -286,11 +279,11 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
       const mag2 = Math.hypot(v2.x, v2.y) || 1;
       const dot = v1.x * v2.x + v1.y * v2.y;
       const cos = Math.max(-1, Math.min(1, Math.abs(dot) / (mag1 * mag2)));
-      return Math.acos(cos) * (180 / Math.PI); // 0 = parallel, 90 = perpendicular
+      return Math.acos(cos) * (180 / Math.PI);
     };
 
-    const s0_s2_parallel = angleBetweenVectors(s0, s2) < 22;
-    const s1_s3_parallel = angleBetweenVectors(s1, s3) < 22;
+    const s0_s2_parallel = angleBetweenVectors(s0, s2) < 24;
+    const s1_s3_parallel = angleBetweenVectors(s1, s3) < 24;
 
     // Równoległobok (Parallelogram): both opposite pairs parallel
     if (s0_s2_parallel && s1_s3_parallel) {
@@ -327,14 +320,12 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
     };
   }
 
-  // C) GWIAZDA (Star): STRICT check — must have alternating inner/outer points!
+  // 6. GWIAZDA (STAR): alternating inner/outer points (5 to 10 sharp corners)
   if (sharpCorners.length >= 5 && sharpCorners.length <= 10) {
-    const dFromCenter = sharpCorners.map((p) => distance(p, { x: cx, y: cy }));
+    const dFromCenter = sharpCorners.map((c) => distance(c.pt, { x: cx, y: cy }));
     const maxR = Math.max(...dFromCenter);
     const minR = Math.min(...dFromCenter);
 
-    // In a real hand-drawn star, ratio of min radius to max radius is <= 0.65
-    // AND points alternate significantly
     if (minR / (maxR || 1) < 0.65) {
       return {
         shapeType: 'star',
@@ -346,7 +337,7 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
     }
   }
 
-  // D) SZEŚCIOKĄT (Hexagon): exactly 6 corners
+  // 7. SZEŚCIOKĄT (HEXAGON): exactly 6 corners
   if (sharpCorners.length === 6 || vCount === 6) {
     return {
       shapeType: 'hexagon',
@@ -358,7 +349,48 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
     };
   }
 
-  // E) INNY WIELOKĄT (General Polygon with 5+ corners)
+  // 8. OKRĄG (CIRCLE) & OWAL / ELIPSA (ELLIPSE)
+  // Only classified if there are no 3+ sharp polygon corners!
+  const a = Math.max(width / 2, 1);
+  const b = Math.max(height / 2, 1);
+  let ellipseDev = 0;
+  for (const p of points) {
+    const normDist = ((p.x - cx) ** 2) / (a * a) + ((p.y - cy) ** 2) / (b * b);
+    ellipseDev += Math.abs(normDist - 1);
+  }
+  const avgEllipseDev = ellipseDev / points.length;
+
+  const radii = points.map((p) => distance(p, { x: cx, y: cy }));
+  const avgRadius = radii.reduce((acc, r) => acc + r, 0) / radii.length;
+  const radiusVariance = radii.reduce((acc, r) => acc + Math.abs(r - avgRadius), 0) / radii.length;
+  const circleRatio = radiusVariance / (avgRadius || 1);
+
+  if (isClosed && sharpCorners.length <= 2) {
+    const aspect = width / height;
+    if (aspect >= 0.76 && aspect <= 1.32 && circleRatio < 0.16) {
+      // Okrąg (Circle)
+      const r = (width + height) / 4;
+      return {
+        shapeType: 'circle',
+        x: cx - r,
+        y: cy - r,
+        width: r * 2,
+        height: r * 2,
+      };
+    }
+    if (avgEllipseDev < 0.28 || circleRatio < 0.25) {
+      // Owal / Elipsa (Ellipse)
+      return {
+        shapeType: 'ellipse',
+        x: minX,
+        y: minY,
+        width,
+        height,
+      };
+    }
+  }
+
+  // 9. INNY WIELOKĄT (General Polygon with 5+ corners)
   if (isClosed && vertices.length >= 5) {
     return {
       shapeType: 'polygon',
@@ -370,9 +402,9 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
     };
   }
 
-  // F) FALLBACK FOR CLOSED SHAPES
+  // 10. FALLBACK FOR CLOSED SHAPES
   if (isClosed) {
-    if (circleRatio < 0.35) {
+    if (circleRatio < 0.18) {
       const r = (width + height) / 4;
       return {
         shapeType: 'circle',
@@ -381,30 +413,15 @@ export function detectShape(rawPoints: Point[]): DetectedShapeResult | null {
         width: r * 2,
         height: r * 2,
       };
-    } else if (vCount <= 4) {
-      return {
-        shapeType: 'rectangle',
-        x: minX,
-        y: minY,
-        width,
-        height,
-        points: [
-          { x: minX, y: minY },
-          { x: maxX, y: minY },
-          { x: maxX, y: maxY },
-          { x: minX, y: maxY },
-        ],
-      };
-    } else {
-      return {
-        shapeType: 'polygon',
-        x: minX,
-        y: minY,
-        width,
-        height,
-        points: vertices,
-      };
     }
+    return {
+      shapeType: 'polygon',
+      x: minX,
+      y: minY,
+      width,
+      height,
+      points: vertices,
+    };
   }
 
   return null;

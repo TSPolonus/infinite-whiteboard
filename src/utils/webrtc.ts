@@ -46,12 +46,20 @@ interface WireEnvelope {
   msg: NetworkMessage;
 }
 
-// Globalne, bezpieczne brokery WebSocket WSS (port 443/8084/8884)
-// HiveMQ (Frankfurt EU ~46ms) jako priorytet, EMQX jako rezerwa
-const CLOUD_BROKERS = [
-  'wss://broker.hivemq.com:8884/mqtt',
-  'wss://broker.emqx.io:8084/mqtt',
-];
+// Globalne, bezpieczne brokery WebSocket WSS o najniższym opóźnieniu w Europie (z opcją brokera własnego/lokalnego)
+export function getBrokersList(): string[] {
+  const custom = typeof window !== 'undefined' ? localStorage.getItem('infinity_custom_broker')?.trim() : null;
+  const list: string[] = [];
+  if (custom && (custom.startsWith('ws://') || custom.startsWith('wss://'))) {
+    list.push(custom);
+  }
+  list.push(
+    'wss://broker.hivemq.com:8884/mqtt', // Frankfurt / Central Europe (~46ms z Gdańska/Warszawy)
+    'wss://test.mosquitto.org:8081',     // Eclipse Mosquitto (~48ms z Polski)
+    'wss://broker.emqx.io:8084/mqtt'     // EMQX Global Backup
+  );
+  return list;
+}
 
 export class BoardNetworkManager {
   private client: MqttClient | null = null;
@@ -99,7 +107,8 @@ export class BoardNetworkManager {
   }
 
   private initMqttConnection(cleanCode: string, brokerIdx: number) {
-    const brokerUrl = CLOUD_BROKERS[brokerIdx % CLOUD_BROKERS.length];
+    const brokers = getBrokersList();
+    const brokerUrl = brokers[brokerIdx % brokers.length];
     this.hasReceivedJoinAck = false;
 
     try {
@@ -168,13 +177,14 @@ export class BoardNetworkManager {
 
       client.on('error', (err) => {
         console.warn(`MQTT błąd brokera [${brokerUrl}]:`, err);
-        // Jeśli pierwszy broker ma problem, przełącz na rezerwowy broker WSS
-        if (brokerIdx === 0 && this.currentBrokerIndex === 0) {
-          this.currentBrokerIndex = 1;
+        const brokers = getBrokersList();
+        if (brokerIdx < brokers.length - 1 && this.currentBrokerIndex === brokerIdx) {
+          const nextIdx = brokerIdx + 1;
+          this.currentBrokerIndex = nextIdx;
           try {
             client.end(true);
           } catch (e) {}
-          this.initMqttConnection(cleanCode, 1);
+          this.initMqttConnection(cleanCode, nextIdx);
         }
       });
 

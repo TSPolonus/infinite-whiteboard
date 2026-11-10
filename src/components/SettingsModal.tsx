@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   X,
   FileImage,
@@ -8,6 +8,7 @@ import {
   Smartphone,
   Grid,
   Palette,
+  Server,
 } from 'lucide-react';
 import type { BoardSettings, CanvasElement } from '../types';
 
@@ -40,6 +41,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onImportJSON,
 }) => {
   const jsonInputRef = useRef<HTMLInputElement>(null);
+  const [customBroker, setCustomBroker] = useState<string>(() =>
+    typeof window !== 'undefined' ? localStorage.getItem('infinity_custom_broker') || '' : ''
+  );
 
   if (!isOpen) return null;
 
@@ -318,6 +322,55 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
+        {/* Serwer i Opóźnienie (Warszawa / Gdańsk / Europa) */}
+        <div style={{ marginTop: 18 }}>
+          <div
+            style={{
+              background: 'rgba(255, 255, 255, 0.04)',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+              borderRadius: 12,
+              padding: '12px 14px',
+              fontSize: 12,
+              color: '#cbd5e1',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>
+              <Server size={15} />
+              <span>Serwer Synchronizacji & Opóźnienie</span>
+            </div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8, lineHeight: 1.4 }}>
+              Aktywne serwery: <strong>HiveMQ & Mosquitto EU (~46ms RTT)</strong> — bezpośrednia trasa światłowodowa do Gdańska i Warszawy.
+            </div>
+            <div style={{ fontSize: 11, color: '#cbd5e1', marginBottom: 4 }}>
+              Własny broker MQTT (lokalny / serwer w Warszawie / Gdańsku / LAN):
+            </div>
+            <input
+              type="text"
+              placeholder="np. wss://moj-serwer.pl:8884/mqtt lub ws://192.168.1.50:9001"
+              value={customBroker}
+              onChange={(e) => {
+                const val = e.target.value;
+                setCustomBroker(val);
+                if (val.trim()) {
+                  localStorage.setItem('infinity_custom_broker', val.trim());
+                } else {
+                  localStorage.removeItem('infinity_custom_broker');
+                }
+              }}
+              style={{
+                width: '100%',
+                background: 'rgba(0, 0, 0, 0.35)',
+                border: '1px solid rgba(255, 255, 255, 0.15)',
+                borderRadius: 8,
+                padding: '7px 10px',
+                color: '#f8fafc',
+                fontSize: 11,
+                boxSizing: 'border-box',
+              }}
+            />
+          </div>
+        </div>
+
         {/* Numer wersji aplikacji w lewym dolnym rogu */}
         <div
           style={{
@@ -330,7 +383,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           }}
         >
           <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 600 }}>
-            Wersja: v2.5.1
+            Wersja: v2.5.2
           </span>
           <span style={{ fontSize: 11, color: '#475569' }}>
             InfinityDraw

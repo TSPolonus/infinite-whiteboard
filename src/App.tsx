@@ -717,8 +717,8 @@ export const App: React.FC = () => {
           const el = elements.find((item) => item.id === id);
           if (el) {
             initPosMap.set(id, { x: (el as any).x || 0, y: (el as any).y || 0 });
-            if (el.type === 'stroke') {
-              strokePtsMap.set(id, el.points.map(p => ({ ...p })));
+            if (el.type === 'stroke' || (el.type === 'shape' && (el as ShapeElement).points)) {
+              strokePtsMap.set(id, (el as any).points.map((p: Point) => ({ ...p })));
             }
           }
         }
@@ -948,7 +948,18 @@ export const App: React.FC = () => {
               }
             }
 
-            return { ...el, x: newX, y: newY, width: newW, height: newH };
+            // Proporcjonalne skalowanie wierzchołków wielokąta/trójkąta przy zmianie rozmiaru ramki
+            let newPoints = (el as ShapeElement).points;
+            if (newPoints && initialBBox.width > 0 && initialBBox.height > 0) {
+              const scaleX = newW / initialBBox.width;
+              const scaleY = newH / initialBBox.height;
+              newPoints = newPoints.map((p) => ({
+                x: newX + (p.x - initialBBox.x) * scaleX,
+                y: newY + (p.y - initialBBox.y) * scaleY,
+              }));
+            }
+
+            return { ...el, x: newX, y: newY, width: newW, height: newH, ...(newPoints ? { points: newPoints } : {}) };
           }
           return el;
         })
@@ -977,10 +988,12 @@ export const App: React.FC = () => {
             // Use absolute offset from fixed dragStart → no drift
             const initPos = elementInitialPositions.get(el.id);
             if (!initPos) return el;
+            const initPoints = strokeInitialPoints.get(el.id);
             return {
               ...el,
               x: initPos.x + totalDx,
               y: initPos.y + totalDy,
+              ...(initPoints ? { points: initPoints.map((p) => ({ x: p.x + totalDx, y: p.y + totalDy })) } : {}),
             };
           } else if (el.type === 'stroke') {
             // Use absolute offset from initial snapshot of points → no drift
