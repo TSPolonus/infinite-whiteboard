@@ -99,8 +99,8 @@ export function drawStroke(
   if (stroke.points.length === 0) return;
 
   ctx.save();
-  ctx.lineCap = 'round';   // Always round caps!
-  ctx.lineJoin = 'round';  // Always round joints!
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
   ctx.strokeStyle = stroke.color;
 
   if (stroke.tool === 'highlighter') {
@@ -391,7 +391,7 @@ export function drawImageElement(
   ctx.restore();
 }
 
-// Optimized, Smooth, Fast Laser Beam (Zero lag on tablets!)
+// Synchronized, Smooth, Zero-Lag Laser Beam
 export function drawLaserTrails(
   ctx: CanvasRenderingContext2D,
   laserPoints: LaserPoint[],
@@ -405,40 +405,41 @@ export function drawLaserTrails(
 
   const defaultDuration = 1500;
 
-  // Pass 1: Smooth outer translucent halo
+  // Pass 1: Semi-transparent outer beam
   for (let i = 1; i < laserPoints.length; i++) {
     const p1 = laserPoints[i - 1];
     const p2 = laserPoints[i];
     const duration = p2.duration || defaultDuration;
-    const age = now - p2.timestamp;
-    if (age >= duration) continue;
+    // Compute age using receivedAt if present to eliminate cross-screen clock skew!
+    const age = now - (p2.receivedAt || p2.timestamp);
+    if (age >= duration || age < 0) continue;
 
     const progress = 1 - age / duration;
     const alpha = Math.pow(progress, 1.3);
     const laserColor = p2.color || '#f43f5e';
-    const lineWidth = Math.max(2, (p2.size || 8) * 1.6 * progress);
+    const lineWidth = Math.max(2, (p2.size || 6) * 1.5 * progress);
 
     ctx.beginPath();
     ctx.strokeStyle = laserColor;
-    ctx.globalAlpha = alpha * 0.4;
+    ctx.globalAlpha = alpha * 0.35;
     ctx.lineWidth = lineWidth * 2.2;
     ctx.moveTo(p1.x, p1.y);
     ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
   }
 
-  // Pass 2: Bright inner core
+  // Pass 2: Bright core
   for (let i = 1; i < laserPoints.length; i++) {
     const p1 = laserPoints[i - 1];
     const p2 = laserPoints[i];
     const duration = p2.duration || defaultDuration;
-    const age = now - p2.timestamp;
-    if (age >= duration) continue;
+    const age = now - (p2.receivedAt || p2.timestamp);
+    if (age >= duration || age < 0) continue;
 
     const progress = 1 - age / duration;
     const alpha = Math.pow(progress, 1.2);
     const laserColor = p2.color || '#f43f5e';
-    const coreWidth = Math.max(1.5, (p2.size || 8) * 0.65 * progress);
+    const coreWidth = Math.max(1.5, (p2.size || 6) * 0.7 * progress);
 
     ctx.beginPath();
     ctx.strokeStyle = laserColor;
@@ -448,24 +449,23 @@ export function drawLaserTrails(
     ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
 
-    // Center white laser reflection
     ctx.beginPath();
     ctx.strokeStyle = '#ffffff';
     ctx.globalAlpha = alpha;
-    ctx.lineWidth = Math.max(1, coreWidth * 0.4);
+    ctx.lineWidth = Math.max(1, coreWidth * 0.45);
     ctx.moveTo(p1.x, p1.y);
     ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
   }
 
-  // Draw glowing pulse dot at the tip
+  // Pulse tip
   const last = laserPoints[laserPoints.length - 1];
   const lastDuration = last.duration || defaultDuration;
-  const lastAge = now - last.timestamp;
-  if (lastAge < lastDuration) {
+  const lastAge = now - (last.receivedAt || last.timestamp);
+  if (lastAge < lastDuration && lastAge >= 0) {
     const laserColor = last.color || '#f43f5e';
     const pulseAlpha = 1 - lastAge / lastDuration;
-    const dotSize = Math.max(3, (last.size || 8) * 0.8);
+    const dotSize = Math.max(3, (last.size || 6) * 0.85);
 
     ctx.beginPath();
     ctx.arc(last.x, last.y, dotSize * 1.8, 0, Math.PI * 2);
@@ -483,28 +483,66 @@ export function drawLaserTrails(
   ctx.restore();
 }
 
-export function drawSelectionBox(
+// Marquee Selection Box (Multi-selection on PC & Tablet)
+export function drawMarqueeBox(
   ctx: CanvasRenderingContext2D,
-  element: CanvasElement,
+  p1: Point,
+  p2: Point,
   transform: ViewportTransform
 ) {
-  const bbox = getElementBBox(element);
-  if (!bbox) return;
+  const minX = Math.min(p1.x, p2.x);
+  const minY = Math.min(p1.y, p2.y);
+  const width = Math.abs(p2.x - p1.x);
+  const height = Math.abs(p2.y - p1.y);
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(56, 189, 248, 0.12)';
+  ctx.fillRect(minX, minY, width, height);
+
+  ctx.strokeStyle = '#38bdf8';
+  ctx.lineWidth = 1.5 / transform.scale;
+  ctx.setLineDash([4 / transform.scale, 4 / transform.scale]);
+  ctx.strokeRect(minX, minY, width, height);
+  ctx.restore();
+}
+
+// Multi-element or single-element selection box
+export function drawSelectionBox(
+  ctx: CanvasRenderingContext2D,
+  elements: CanvasElement[],
+  transform: ViewportTransform
+) {
+  if (elements.length === 0) return;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+  for (const el of elements) {
+    const bbox = getElementBBox(el);
+    if (bbox) {
+      if (bbox.minX < minX) minX = bbox.minX;
+      if (bbox.minY < minY) minY = bbox.minY;
+      if (bbox.maxX > maxX) maxX = bbox.maxX;
+      if (bbox.maxY > maxY) maxY = bbox.maxY;
+    }
+  }
+
+  if (minX === Infinity) return;
 
   const pad = 8;
-  const x = bbox.minX - pad;
-  const y = bbox.minY - pad;
-  const w = bbox.maxX - bbox.minX + pad * 2;
-  const h = bbox.maxY - bbox.minY + pad * 2;
-  const rotation = (element as any).rotation || 0;
+  const x = minX - pad;
+  const y = minY - pad;
+  const w = maxX - minX + pad * 2;
+  const h = maxY - minY + pad * 2;
 
   ctx.save();
 
-  if (rotation !== 0) {
-    const cx = bbox.minX + (bbox.maxX - bbox.minX) / 2;
-    const cy = bbox.minY + (bbox.maxY - bbox.minY) / 2;
+  // If exactly one element has rotation
+  const singleRotation = elements.length === 1 ? (elements[0] as any).rotation || 0 : 0;
+  if (singleRotation !== 0) {
+    const cx = minX + (maxX - minX) / 2;
+    const cy = minY + (maxY - minY) / 2;
     ctx.translate(cx, cy);
-    ctx.rotate((rotation * Math.PI) / 180);
+    ctx.rotate((singleRotation * Math.PI) / 180);
     ctx.translate(-cx, -cy);
   }
 
@@ -536,7 +574,7 @@ export function drawSelectionBox(
     ctx.strokeRect(hPos.x - handleSize / 2, hPos.y - handleSize / 2, handleSize, handleSize);
   }
 
-  // Rotation Handle (top)
+  // Top Rotation Handle
   const rotDist = 26 / transform.scale;
   const rotX = x + w / 2;
   const rotY = y - rotDist;
@@ -557,12 +595,33 @@ export function drawSelectionBox(
   ctx.restore();
 }
 
+export function getCombinedBBox(elements: CanvasElement[]): {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+} | null {
+  if (elements.length === 0) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const el of elements) {
+    const bbox = getElementBBox(el);
+    if (bbox) {
+      if (bbox.minX < minX) minX = bbox.minX;
+      if (bbox.minY < minY) minY = bbox.minY;
+      if (bbox.maxX > maxX) maxX = bbox.maxX;
+      if (bbox.maxY > maxY) maxY = bbox.maxY;
+    }
+  }
+  if (minX === Infinity) return null;
+  return { minX, minY, maxX, maxY };
+}
+
 export function getHandleAtPoint(
   worldPos: Point,
-  element: CanvasElement,
+  elements: CanvasElement[],
   transform: ViewportTransform
 ): ResizeHandle | null {
-  const bbox = getElementBBox(element);
+  const bbox = getCombinedBBox(elements);
   if (!bbox) return null;
 
   const pad = 8;
@@ -572,9 +631,8 @@ export function getHandleAtPoint(
   const h = bbox.maxY - bbox.minY + pad * 2;
   const threshold = 16 / transform.scale;
 
-  // Un-rotate point if element is rotated
   let testPos = worldPos;
-  const rotation = (element as any).rotation || 0;
+  const rotation = elements.length === 1 ? (elements[0] as any).rotation || 0 : 0;
   if (rotation !== 0) {
     const cx = bbox.minX + (bbox.maxX - bbox.minX) / 2;
     const cy = bbox.minY + (bbox.maxY - bbox.minY) / 2;
@@ -589,7 +647,6 @@ export function getHandleAtPoint(
     };
   }
 
-  // Check rotation handle
   const rotDist = 26 / transform.scale;
   const rotX = x + w / 2;
   const rotY = y - rotDist;
@@ -597,7 +654,6 @@ export function getHandleAtPoint(
     return 'rotate';
   }
 
-  // Corner and edge handles
   const handles: { handle: ResizeHandle; x: number; y: number }[] = [
     { handle: 'tl', x: x, y: y },
     { handle: 't', x: x + w / 2, y: y },
@@ -716,6 +772,28 @@ export function isPointInsideElement(point: Point, element: CanvasElement): bool
   return false;
 }
 
+export function isElementInsideBox(
+  element: CanvasElement,
+  p1: Point,
+  p2: Point
+): boolean {
+  const bbox = getElementBBox(element);
+  if (!bbox) return false;
+
+  const minX = Math.min(p1.x, p2.x);
+  const maxX = Math.max(p1.x, p2.x);
+  const minY = Math.min(p1.y, p2.y);
+  const maxY = Math.max(p1.y, p2.y);
+
+  // Check intersection
+  return (
+    bbox.minX <= maxX &&
+    bbox.maxX >= minX &&
+    bbox.minY <= maxY &&
+    bbox.maxY >= minY
+  );
+}
+
 function distToSegment(p: Point, a: Point, b: Point): number {
   const l2 = (b.x - a.x) ** 2 + (b.y - a.y) ** 2;
   if (l2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
@@ -724,7 +802,7 @@ function distToSegment(p: Point, a: Point, b: Point): number {
   return Math.hypot(p.x - (a.x + t * (b.x - a.x)), p.y - (a.y + t * (b.y - a.y)));
 }
 
-// Continuous Freehand Brush Eraser (interpolates trajectory and smoothly cuts strokes)
+// Continuous Freehand Brush Eraser
 export function eraseStrokePixels(
   stroke: StrokeElement,
   erasePoint: Point,

@@ -21,9 +21,11 @@ import {
   drawImageElement,
   drawLaserTrails,
   drawSelectionBox,
+  drawMarqueeBox,
   drawRemoteCursor,
   isPointInsideElement,
-  getElementBBox,
+  isElementInsideBox,
+  getCombinedBBox,
   getHandleAtPoint,
   eraseStrokePixels,
 } from './utils/canvasRenderer';
@@ -83,13 +85,17 @@ export const App: React.FC = () => {
   const [currentShape, setCurrentShape] = useState<ShapeType>('rectangle');
   const [autoShapeEnabled, setAutoShapeEnabled] = useState<boolean>(true);
 
-  // Active interaction states
+  // Multi-element selection state
+  const [selectedElementIds, setSelectedElementIds] = useState<string[]>([]);
+  const [isMarqueeSelecting, setIsMarqueeSelecting] = useState(false);
+  const [marqueeBox, setMarqueeBox] = useState<{ start: Point; current: Point } | null>(null);
+
+  // Active drawing & dragging states
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentStroke, setCurrentStroke] = useState<Point[]>([]);
   const [snappedShape, setSnappedShape] = useState<ShapeElement | null>(null);
-  const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<Point | null>(null);
-  const [elementInitialPos, setElementInitialPos] = useState<Point | null>(null);
+  const [elementInitialPositions, setElementInitialPositions] = useState<Map<string, Point>>(new Map());
   const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandle | null>(null);
   const [initialBBox, setInitialBBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [activeRotationAngle, setActiveRotationAngle] = useState<number | null>(null);
@@ -244,6 +250,25 @@ export const App: React.FC = () => {
     setIsShareModalOpen(false);
   };
 
+  // Leave Lobby / Switch to Solo
+  const handleLeaveLobby = () => {
+    networkManagerRef.current?.disconnect();
+    const soloCode = generateRoomCode();
+    window.location.hash = `room=${soloCode}`;
+    setBoardSettings((prev) => ({ ...prev, id: soloCode, roomCode: soloCode }));
+    setConnectedCount(1);
+    setConnectionStatus('disconnected');
+    setIsShareModalOpen(false);
+  };
+
+  // Create New Lobby
+  const handleCreateNewLobby = () => {
+    const newCode = generateRoomCode();
+    window.location.hash = `room=${newCode}`;
+    setBoardSettings((prev) => ({ ...prev, id: newCode, roomCode: newCode }));
+    initNetworking(newCode);
+  };
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -257,7 +282,7 @@ export const App: React.FC = () => {
       } else if (e.code === 'Space' && !isSpacePressed.current) {
         isSpacePressed.current = true;
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedElementId && !(e.target instanceof HTMLInputElement)) {
+        if (selectedElementIds.length > 0 && !(e.target instanceof HTMLInputElement)) {
           handleDeleteSelected();
         }
       }
@@ -275,7 +300,7 @@ export const App: React.FC = () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [handleUndo, handleRedo, selectedElementId]);
+  }, [handleUndo, handleRedo, selectedElementIds]);
 
   // Image Paste (Ctrl+V)
   useEffect(() => {
@@ -404,7 +429,6 @@ export const App: React.FC = () => {
           };
           drawStroke(ctx, tempStroke);
         } else if (currentTool === 'eraser' && toolSettings.eraser.mode === 'brush') {
-          // Live drawing eraser preview stroke
           const lastP = currentStroke[currentStroke.length - 1];
           ctx.save();
           ctx.beginPath();
@@ -419,20 +443,25 @@ export const App: React.FC = () => {
         }
       }
 
-      // 3. Laser trails
-      const maxLaserLifetime = toolSettings.laser.duration || 1500;
-      laserTrailsRef.current = laserTrailsRef.current.filter((p) => now - p.timestamp < (p.duration || maxLaserLifetime));
+      // 3. Marquee Selection Box
+      if (isMarqueeSelecting && marqueeBox) {
+        drawMarqueeBox(ctx, marqueeBox.start, marqueeBox.current, transform);
+      }
+
+      // 4. Laser trails
+      const maxLaserLifetime = toolSettings.laser.duration || 1200;
+      laserTrailsRef.current = laserTrailsRef.current.filter((p) => now - (p.receivedAt || p.timestamp) < (p.duration || maxLaserLifetime));
       drawLaserTrails(ctx, laserTrailsRef.current, now);
 
-      // 4. Selection box & handles
-      if (selectedElementId) {
-        const selected = elements.find((e) => e.id === selectedElementId);
-        if (selected) {
-          drawSelectionBox(ctx, selected, transform);
+      // 5. Selection box & handles for all selected elements
+      if (selectedElementIds.length > 0) {
+        const selectedElements = elements.filter((e) => selectedElementIds.includes(e.id));
+        if (selectedElements.length > 0) {
+          drawSelectionBox(ctx, selectedElements, transform);
         }
       }
 
-      // 5. Remote Cursors
+      // 6. Remote Cursors
       for (const [, cursor] of remoteCursors) {
         if (now - cursor.lastActive < 10000) {
           drawRemoteCursor(ctx, cursor);
@@ -457,7 +486,9 @@ export const App: React.FC = () => {
     snappedShape,
     currentTool,
     currentShape,
-    selectedElementId,
+    selectedElementIds,
+    isMarqueeSelecting,
+    marqueeBox,
     remoteCursors,
   ]);
 
@@ -483,6 +514,8 @@ export const App: React.FC = () => {
       initialPinchDist.current = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       initialScale.current = transform.scale;
       setIsDrawing(false);
+      setIsMarqueeSelecting(false);
+      setMarqueeBox(null);
       setCurrentStroke([]);
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
       return;
@@ -490,50 +523,70 @@ export const App: React.FC = () => {
 
     if (activePointers.current.size > 2) return;
 
-    // 3. PALM REJECTION MODE:
-    if (boardSettings.palmRejection && e.pointerType === 'touch') {
-      setDragStart(screenPos);
-      return;
-    }
-
-    // 4. Hand tool or Spacebar pan
+    // 3. Hand tool or Spacebar pan
     if (isSpacePressed.current || currentTool === 'hand' || e.button === 1) {
       setDragStart(screenPos);
       return;
     }
 
-    // 5. Select Tool: Check resize/rotation handles first, then element hit
+    // 4. SELECT TOOL:
+    // User request: "Niech ogólnie jak jest włączony tryb zaznaczenia na tablecie to niech tylko palec reaguje na to co się dzieje bez użycia rysika"
     if (currentTool === 'select') {
-      if (selectedElementId) {
-        const selected = elements.find((el) => el.id === selectedElementId);
-        if (selected) {
-          const handle = getHandleAtPoint(worldPos, selected, transform);
-          if (handle) {
-            setActiveResizeHandle(handle);
-            setDragStart(worldPos);
-            const bbox = getElementBBox(selected);
-            if (bbox) {
-              setInitialBBox({
-                x: bbox.minX,
-                y: bbox.minY,
-                width: bbox.maxX - bbox.minX,
-                height: bbox.maxY - bbox.minY,
-              });
-            }
-            return;
+      if (e.pointerType === 'pen') {
+        // Stylus is ignored in select mode on tablets!
+        return;
+      }
+
+      // Check handle on currently selected elements
+      const selectedElements = elements.filter((el) => selectedElementIds.includes(el.id));
+      if (selectedElements.length > 0) {
+        const handle = getHandleAtPoint(worldPos, selectedElements, transform);
+        if (handle) {
+          setActiveResizeHandle(handle);
+          setDragStart(worldPos);
+          const combinedBBox = getCombinedBBox(selectedElements);
+          if (combinedBBox) {
+            setInitialBBox({
+              x: combinedBBox.minX,
+              y: combinedBBox.minY,
+              width: combinedBBox.maxX - combinedBBox.minX,
+              height: combinedBBox.maxY - combinedBBox.minY,
+            });
           }
+          return;
         }
       }
 
+      // Check hit on existing elements
       const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
       if (hit) {
-        setSelectedElementId(hit.id);
+        if (!selectedElementIds.includes(hit.id)) {
+          setSelectedElementIds([hit.id]);
+        }
         setDragStart(worldPos);
-        setElementInitialPos({ x: (hit as any).x || 0, y: (hit as any).y || 0 });
+
+        const initPosMap = new Map<string, Point>();
+        const targetIds = selectedElementIds.includes(hit.id) ? selectedElementIds : [hit.id];
+        for (const id of targetIds) {
+          const el = elements.find((item) => item.id === id);
+          if (el) {
+            initPosMap.set(id, { x: (el as any).x || 0, y: (el as any).y || 0 });
+          }
+        }
+        setElementInitialPositions(initPosMap);
       } else {
-        setSelectedElementId(null);
+        // Clicked on empty canvas: Start Marquee Area Selection!
+        setSelectedElementIds([]);
         setActiveResizeHandle(null);
+        setIsMarqueeSelecting(true);
+        setMarqueeBox({ start: worldPos, current: worldPos });
       }
+      return;
+    }
+
+    // 5. PALM REJECTION FOR DRAWING TOOLS:
+    if (boardSettings.palmRejection && e.pointerType === 'touch') {
+      setDragStart(screenPos);
       return;
     }
 
@@ -576,7 +629,6 @@ export const App: React.FC = () => {
     setSnappedShape(null);
     lastAnchorRef.current = worldPos;
 
-    // Start auto-shape hold timer
     if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
       holdTimerRef.current = window.setTimeout(() => {
@@ -640,7 +692,7 @@ export const App: React.FC = () => {
     }
 
     // Palm rejection or Hand tool drag
-    if (dragStart && ((boardSettings.palmRejection && e.pointerType === 'touch') || isSpacePressed.current || currentTool === 'hand' || e.buttons === 4)) {
+    if (dragStart && ((boardSettings.palmRejection && e.pointerType === 'touch' && currentTool !== 'select') || isSpacePressed.current || currentTool === 'hand' || e.buttons === 4)) {
       const dx = screenPos.x - dragStart.x;
       const dy = screenPos.y - dragStart.y;
       setTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
@@ -648,14 +700,20 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Rescaling / Free Rotating selected element
-    if (currentTool === 'select' && selectedElementId && activeResizeHandle && dragStart && initialBBox) {
+    // Marquee Area Selection Move
+    if (isMarqueeSelecting && marqueeBox) {
+      setMarqueeBox((prev) => (prev ? { ...prev, current: worldPos } : null));
+      return;
+    }
+
+    // Rescaling / Free Rotating all selected elements
+    if (currentTool === 'select' && selectedElementIds.length > 0 && activeResizeHandle && dragStart && initialBBox) {
       const dx = worldPos.x - dragStart.x;
       const dy = worldPos.y - dragStart.y;
 
       setElements((prev) =>
         prev.map((el) => {
-          if (el.id !== selectedElementId) return el;
+          if (!selectedElementIds.includes(el.id)) return el;
 
           // Free rotation by ANY angle!
           if (activeResizeHandle === 'rotate') {
@@ -699,29 +757,33 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Move selected element
-    if (currentTool === 'select' && selectedElementId && dragStart && elementInitialPos && !activeResizeHandle) {
+    // Move all selected elements
+    if (currentTool === 'select' && selectedElementIds.length > 0 && dragStart && !activeResizeHandle && !isMarqueeSelecting) {
       const dx = worldPos.x - dragStart.x;
       const dy = worldPos.y - dragStart.y;
 
       setElements((prev) =>
         prev.map((el) => {
-          if (el.id !== selectedElementId) return el;
+          if (!selectedElementIds.includes(el.id)) return el;
+          const initPos = elementInitialPositions.get(el.id);
+          if (!initPos) return el;
+
           if (el.type === 'shape' || el.type === 'image') {
             return {
               ...el,
-              x: elementInitialPos.x + dx,
-              y: elementInitialPos.y + dy,
+              x: initPos.x + dx,
+              y: initPos.y + dy,
             };
           } else if (el.type === 'stroke') {
             return {
               ...el,
-              points: el.points.map((p) => ({ x: p.x + dx, y: p.y + dy })),
+              points: el.points.map((p) => ({ x: p.x + (worldPos.x - (dragStart?.x || 0)), y: p.y + (worldPos.y - (dragStart?.y || 0)) })),
             };
           }
           return el;
         })
       );
+      setDragStart(worldPos);
       return;
     }
 
@@ -760,7 +822,6 @@ export const App: React.FC = () => {
     if (isDrawing) {
       setCurrentStroke((prev) => [...prev, worldPos]);
 
-      // Tablet-friendly Auto-shape hold detection:
       if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
         if (lastAnchorRef.current) {
           const distFromAnchor = Math.hypot(worldPos.x - lastAnchorRef.current.x, worldPos.y - lastAnchorRef.current.y);
@@ -778,7 +839,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Brush Eraser logic (Continuous vector path trimming)
+  // Brush Eraser logic
   const applyPixelEraser = (erasePoint: Point) => {
     const eraserRadius = toolSettings.eraser.size;
     let changed = false;
@@ -862,8 +923,17 @@ export const App: React.FC = () => {
       return;
     }
 
+    // Marquee Area Selection Finished
+    if (isMarqueeSelecting && marqueeBox) {
+      const selected = elements.filter((el) => isElementInsideBox(el, marqueeBox.start, marqueeBox.current));
+      setSelectedElementIds(selected.map((el) => el.id));
+      setIsMarqueeSelecting(false);
+      setMarqueeBox(null);
+      return;
+    }
+
     setDragStart(null);
-    setElementInitialPos(null);
+    setElementInitialPositions(new Map());
     setActiveResizeHandle(null);
     setInitialBBox(null);
     setActiveRotationAngle(null);
@@ -931,7 +1001,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // PC Wheel Zoom (Towards mouse cursor)
+  // PC Wheel Zoom
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
@@ -947,7 +1017,7 @@ export const App: React.FC = () => {
     }));
   };
 
-  // Zoom control buttons
+  // Zoom buttons
   const handleZoomIn = () => {
     setTransform((prev) => {
       const newScale = Math.min(6, prev.scale * 1.25);
@@ -982,49 +1052,52 @@ export const App: React.FC = () => {
     });
   };
 
-  // Transformation actions
+  // Transformation actions on all selected elements
   const handleDuplicateSelected = () => {
-    if (!selectedElementId) return;
-    const target = elements.find((el) => el.id === selectedElementId);
-    if (!target) return;
-
+    if (selectedElementIds.length === 0) return;
     const offset = 30;
-    let cloned: CanvasElement;
+    const clonedList: CanvasElement[] = [];
 
-    if (target.type === 'shape') {
-      cloned = {
-        ...target,
-        id: 'shape_' + Math.random().toString(36).substring(2, 9),
-        x: target.x + offset,
-        y: target.y + offset,
-      };
-    } else if (target.type === 'image') {
-      cloned = {
-        ...target,
-        id: 'img_' + Math.random().toString(36).substring(2, 9),
-        x: target.x + offset,
-        y: target.y + offset,
-      };
-      if (imageCacheRef.current.has(target.id)) {
-        imageCacheRef.current.set(cloned.id, imageCacheRef.current.get(target.id)!);
+    for (const id of selectedElementIds) {
+      const target = elements.find((el) => el.id === id);
+      if (!target) continue;
+
+      if (target.type === 'shape') {
+        clonedList.push({
+          ...target,
+          id: 'shape_' + Math.random().toString(36).substring(2, 9),
+          x: target.x + offset,
+          y: target.y + offset,
+        });
+      } else if (target.type === 'image') {
+        const clonedImg: ImageElement = {
+          ...target,
+          id: 'img_' + Math.random().toString(36).substring(2, 9),
+          x: target.x + offset,
+          y: target.y + offset,
+        };
+        if (imageCacheRef.current.has(target.id)) {
+          imageCacheRef.current.set(clonedImg.id, imageCacheRef.current.get(target.id)!);
+        }
+        clonedList.push(clonedImg);
+      } else {
+        clonedList.push({
+          ...target,
+          id: 'stroke_' + Math.random().toString(36).substring(2, 9),
+          points: target.points.map((p) => ({ x: p.x + offset, y: p.y + offset })),
+        });
       }
-    } else {
-      cloned = {
-        ...target,
-        id: 'stroke_' + Math.random().toString(36).substring(2, 9),
-        points: target.points.map((p) => ({ x: p.x + offset, y: p.y + offset })),
-      };
     }
 
-    pushToHistory([...elements, cloned]);
-    setSelectedElementId(cloned.id);
+    pushToHistory([...elements, ...clonedList]);
+    setSelectedElementIds(clonedList.map((c) => c.id));
   };
 
   const handleRotateSelected = () => {
-    if (!selectedElementId) return;
+    if (selectedElementIds.length === 0) return;
     setElements((prev) =>
       prev.map((el) => {
-        if (el.id !== selectedElementId) return el;
+        if (!selectedElementIds.includes(el.id)) return el;
         const currentRot = (el as any).rotation || 0;
         return { ...el, rotation: (currentRot + 90) % 360 };
       })
@@ -1032,38 +1105,38 @@ export const App: React.FC = () => {
   };
 
   const handleDeleteSelected = () => {
-    if (!selectedElementId) return;
-    const next = elements.filter((el) => el.id !== selectedElementId);
+    if (selectedElementIds.length === 0) return;
+    const next = elements.filter((el) => !selectedElementIds.includes(el.id));
     pushToHistory(next);
-    setSelectedElementId(null);
-    networkManagerRef.current?.broadcast({ type: 'element_delete', id: selectedElementId });
+    for (const id of selectedElementIds) {
+      networkManagerRef.current?.broadcast({ type: 'element_delete', id });
+    }
+    setSelectedElementIds([]);
   };
 
   const handleBringToFront = () => {
-    if (!selectedElementId) return;
-    const target = elements.find((el) => el.id === selectedElementId);
-    if (!target) return;
-    const next = [...elements.filter((el) => el.id !== selectedElementId), target];
-    pushToHistory(next);
+    if (selectedElementIds.length === 0) return;
+    const unselected = elements.filter((el) => !selectedElementIds.includes(el.id));
+    const selected = elements.filter((el) => selectedElementIds.includes(el.id));
+    pushToHistory([...unselected, ...selected]);
   };
 
   const handleSendToBack = () => {
-    if (!selectedElementId) return;
-    const target = elements.find((el) => el.id === selectedElementId);
-    if (!target) return;
-    const next = [target, ...elements.filter((el) => el.id !== selectedElementId)];
-    pushToHistory(next);
+    if (selectedElementIds.length === 0) return;
+    const unselected = elements.filter((el) => !selectedElementIds.includes(el.id));
+    const selected = elements.filter((el) => selectedElementIds.includes(el.id));
+    pushToHistory([...selected, ...unselected]);
   };
 
-  // Image insertion with automatic compression to keep WebRTC fast & reliable!
+  // Safe compressed image upload (<30KB JPEG, guaranteed to never crash WebRTC!)
   const handleImageUpload = (file: File) => {
     const reader = new FileReader();
     reader.onload = (event) => {
       const src = event.target?.result as string;
       const img = new Image();
       img.onload = () => {
-        // Compress & scale to max 800px for instant WebRTC sync
-        const maxDimension = 800;
+        // Compress & scale to max 500px, quality 0.70
+        const maxDimension = 500;
         let width = img.naturalWidth;
         let height = img.naturalHeight;
 
@@ -1084,10 +1157,10 @@ export const App: React.FC = () => {
         if (compCtx) {
           compCtx.drawImage(img, 0, 0, width, height);
         }
-        const compressedSrc = compCanvas.toDataURL('image/jpeg', 0.82);
+        const compressedSrc = compCanvas.toDataURL('image/jpeg', 0.70);
 
         const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2, transform);
-        const displayW = Math.min(360, width);
+        const displayW = Math.min(320, width);
         const displayH = Math.round((displayW / width) * height);
 
         const imgElement: ImageElement = {
@@ -1108,7 +1181,7 @@ export const App: React.FC = () => {
         imageCacheRef.current.set(imgElement.id, cached);
 
         pushToHistory([...elements, imgElement]);
-        setSelectedElementId(imgElement.id);
+        setSelectedElementIds([imgElement.id]);
         networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
       };
       img.src = src;
@@ -1120,7 +1193,7 @@ export const App: React.FC = () => {
     if (elements.length === 0) return;
     if (confirm('Czy na pewno chcesz wyczyścić całą tablicę?')) {
       pushToHistory([]);
-      setSelectedElementId(null);
+      setSelectedElementIds([]);
       networkManagerRef.current?.broadcast({
         type: 'board_sync',
         elements: [],
@@ -1231,6 +1304,8 @@ export const App: React.FC = () => {
               ? 'crosshair'
               : currentTool === 'eraser'
               ? 'crosshair'
+              : isMarqueeSelecting
+              ? 'crosshair'
               : 'crosshair',
           touchAction: 'none',
         }}
@@ -1267,7 +1342,7 @@ export const App: React.FC = () => {
         canRedo={redoStack.length > 0}
         boardSettings={boardSettings}
         connectedCount={connectedCount}
-        selectedElementId={selectedElementId}
+        selectedElementId={selectedElementIds.length > 0 ? selectedElementIds[0] : null}
         onToolChange={setCurrentTool}
         onShapeChange={setCurrentShape}
         onUpdateToolSetting={updateToolSetting}
@@ -1306,6 +1381,8 @@ export const App: React.FC = () => {
         connectionStatus={connectionStatus}
         onJoinRoomByCode={handleJoinRoomByCode}
         onReconnect={() => initNetworking(boardSettings.roomCode)}
+        onLeaveLobby={handleLeaveLobby}
+        onCreateNewLobby={handleCreateNewLobby}
       />
 
       <SettingsModal

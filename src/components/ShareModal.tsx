@@ -7,9 +7,10 @@ import {
   Globe,
   Share2,
   Users,
-  KeyRound,
   LogIn,
   RotateCcw,
+  LogOut,
+  PlusCircle,
 } from 'lucide-react';
 import type { BoardSettings } from '../types';
 import { hashPassword } from '../utils/webrtc';
@@ -23,6 +24,8 @@ interface ShareModalProps {
   connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'host';
   onJoinRoomByCode: (code: string) => void;
   onReconnect: () => void;
+  onLeaveLobby: () => void;
+  onCreateNewLobby: () => void;
 }
 
 export const ShareModal: React.FC<ShareModalProps> = ({
@@ -34,6 +37,8 @@ export const ShareModal: React.FC<ShareModalProps> = ({
   connectionStatus,
   onJoinRoomByCode,
   onReconnect,
+  onLeaveLobby,
+  onCreateNewLobby,
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
@@ -110,7 +115,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            marginBottom: 20,
+            marginBottom: 18,
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -130,7 +135,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
             </div>
             <div>
               <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
-                Lobby i Udostępnianie
+                Lobby i Pokoje
               </h3>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 2 }}>
                 <span
@@ -152,7 +157,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
                     : connectionStatus === 'connected'
                     ? 'Połączono z lobby'
                     : connectionStatus === 'connecting'
-                    ? 'Łączenie z siecią...'
+                    ? 'Łączenie...'
                     : 'Rozłączono'}
                 </span>
                 {connectionStatus === 'disconnected' && (
@@ -185,7 +190,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           </button>
         </div>
 
-        {/* Big Room Code Box */}
+        {/* Room Code Box */}
         <div
           style={{
             background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.12), rgba(129, 140, 248, 0.12))',
@@ -200,7 +205,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
         >
           <div>
             <div style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 1 }}>
-              Twój Kod Pokoju (Lobby)
+              Aktualny Kod Pokoju
             </div>
             <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: 4, color: '#38bdf8' }}>
               {boardSettings.roomCode}
@@ -224,10 +229,49 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           </button>
         </div>
 
-        {/* Join another lobby by code */}
+        {/* Leave Lobby / Create New Lobby Buttons */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
+          <button
+            className="glass-btn"
+            onClick={onCreateNewLobby}
+            style={{
+              padding: '9px 12px',
+              borderRadius: 10,
+              background: 'rgba(56, 189, 248, 0.15)',
+              border: '1px solid rgba(56, 189, 248, 0.4)',
+              color: '#38bdf8',
+              fontSize: 12,
+              fontWeight: 600,
+              gap: 6,
+            }}
+          >
+            <PlusCircle size={15} />
+            <span>Nowe lobby (kod)</span>
+          </button>
+
+          <button
+            className="glass-btn"
+            onClick={onLeaveLobby}
+            style={{
+              padding: '9px 12px',
+              borderRadius: 10,
+              background: 'rgba(239, 68, 68, 0.15)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              color: '#fca5a5',
+              fontSize: 12,
+              fontWeight: 600,
+              gap: 6,
+            }}
+          >
+            <LogOut size={15} />
+            <span>Opuść lobby (Solo)</span>
+          </button>
+        </div>
+
+        {/* Join by code form */}
         <form onSubmit={handleJoinByCode} style={{ marginBottom: 16 }}>
           <label style={{ fontSize: 12, fontWeight: 500, color: '#cbd5e1', display: 'block', marginBottom: 6 }}>
-            Lub dołącz do innego lobby wpisując kod:
+            Dołącz do innego lobby przez kod:
           </label>
           <div style={{ display: 'flex', gap: 8 }}>
             <input
@@ -262,7 +306,6 @@ export const ShareModal: React.FC<ShareModalProps> = ({
                 fontSize: 13,
                 fontWeight: 600,
                 gap: 6,
-                cursor: joinCodeInput.trim() ? 'pointer' : 'default',
               }}
             >
               <LogIn size={15} />
@@ -271,10 +314,10 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           </div>
         </form>
 
-        {/* Shareable Link Box */}
-        <div style={{ marginBottom: 18 }}>
+        {/* Link Box */}
+        <div style={{ marginBottom: 16 }}>
           <label style={{ fontSize: 12, fontWeight: 500, color: '#cbd5e1', display: 'block', marginBottom: 6 }}>
-            Bezpośredni link do tablicy:
+            Lub bezpośredni link:
           </label>
           <div
             style={{
@@ -320,27 +363,25 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           </div>
         </div>
 
-        {/* Room Status & Password settings */}
+        {/* Password settings */}
         <div
           style={{
             background: 'rgba(15, 23, 42, 0.6)',
-            padding: 14,
+            padding: 12,
             borderRadius: 12,
             border: '1px solid rgba(255,255,255,0.08)',
-            marginBottom: 16,
+            marginBottom: 14,
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {isProtected ? <Lock size={17} color="#fbbf24" /> : <Globe size={17} color="#4ade80" />}
+              {isProtected ? <Lock size={16} color="#fbbf24" /> : <Globe size={16} color="#4ade80" />}
               <div>
                 <div style={{ fontSize: 13, fontWeight: 600 }}>
-                  Status lobby: {isProtected ? 'Dostęp za hasłem' : 'Publiczny'}
+                  Status: {isProtected ? 'Dostęp za hasłem' : 'Publiczny'}
                 </div>
                 <div style={{ fontSize: 11, color: '#94a3b8' }}>
-                  {isProtected
-                    ? 'Tylko osoby z hasłem mogą rysować na tablicy'
-                    : 'Każdy z kodem lub linkiem może dołączyć'}
+                  {isProtected ? 'Wymaga wpisania hasła' : 'Każdy z kodem może dołączyć'}
                 </div>
               </div>
             </div>
@@ -379,17 +420,10 @@ export const ShareModal: React.FC<ShareModalProps> = ({
 
           {isProtected && (
             <div style={{ marginTop: 10 }}>
-              <label style={{ fontSize: 11, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 5, marginBottom: 5 }}>
-                <KeyRound size={13} /> Hasło do lobby:
-              </label>
               <div style={{ display: 'flex', gap: 8 }}>
                 <input
                   type="password"
-                  placeholder={
-                    boardSettings.passwordHash
-                      ? '•••••••• (Hasło aktywne)'
-                      : 'Wpisz hasło...'
-                  }
+                  placeholder={boardSettings.passwordHash ? '••••••••' : 'Wpisz hasło...'}
                   value={passwordInput}
                   onChange={(e) => setPasswordInput(e.target.value)}
                   style={{
@@ -422,22 +456,12 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           )}
         </div>
 
-        {/* Footer Info */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            fontSize: 12,
-            color: '#94a3b8',
-          }}
-        >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12, color: '#94a3b8' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <Users size={15} color="#38bdf8" />
-            <span>Osoby w pokoju: <strong>{connectedCount}</strong></span>
+            <span>Osób w pokoju: <strong>{connectedCount}</strong></span>
           </div>
-
-          <div>Tablet, Telefon i Komputer</div>
+          <div>Działa na iOS, Android & PC</div>
         </div>
       </div>
     </div>
