@@ -30,6 +30,8 @@ import {
   getShapeVertices,
   eraseStrokePixels,
   clearPixelCache,
+  drawSnappedShapeEditHandles,
+  getSnappedShapeVertexAtPoint,
 } from './utils/canvasRenderer';
 import type { ResizeHandle } from './utils/canvasRenderer';
 import { detectShape } from './utils/shapeDetection';
@@ -153,8 +155,9 @@ export const App: React.FC = () => {
   const draggedInitialElementsRef = useRef<CanvasElement[]>([]);
   const resizedInitialElementsRef = useRef<CanvasElement[]>([]);
 
-  // Interaktywna modyfikacja dopasowanego kształtu podczas trzymania rysowania
+  // Interaktywna modyfikacja dopasowanego kształtu podczas trzymania rysowania (styl Starnote)
   const isAdjustingSnappedShapeRef = useRef<boolean>(false);
+  const activeSnappedVertexIndexRef = useRef<number | null>(null);
   const snappedInitialShapeRef = useRef<ShapeElement | null>(null);
   const snapStartPointerRef = useRef<Point | null>(null);
 
@@ -198,8 +201,33 @@ export const App: React.FC = () => {
     setUndoRevision((r) => r + 1);
   }, []);
 
+  // Finalizacja i zatwierdzenie dopasowanego kształtu do tablicy (styl Starnote)
+  const finalizeCurrentSnappedShape = useCallback(() => {
+    if (!snappedShape) return;
+    const myId = networkManagerRef.current?.getUserId() || 'me';
+    const shapeWithUser: ShapeElement = { ...snappedShape, userId: myId };
+    registerMyCreatedElement(shapeWithUser);
+    pushToHistory([...elementsRef.current.filter((e) => e.id !== shapeWithUser.id), shapeWithUser]);
+    networkManagerRef.current?.broadcast({ type: 'element_add', element: shapeWithUser });
+    setSnappedShape(null);
+    setCurrentStroke([]);
+    isAdjustingSnappedShapeRef.current = false;
+    activeSnappedVertexIndexRef.current = null;
+    snappedInitialShapeRef.current = null;
+    snapStartPointerRef.current = null;
+  }, [snappedShape, registerMyCreatedElement, pushToHistory]);
+
   // Wszechstronne Collaborative Undo: cofa rysowanie, przesuwanie, zmianę rozmiaru, usuwanie, obrót itp.
   const handleUndo = useCallback(() => {
+    if (snappedShape) {
+      setSnappedShape(null);
+      setCurrentStroke([]);
+      isAdjustingSnappedShapeRef.current = false;
+      activeSnappedVertexIndexRef.current = null;
+      showToastRef.current('↩️ Anulowano tworzenie kształtu');
+      return;
+    }
+
     if (undoStackRef.current.length === 0) {
       if (elementsRef.current.length > 0) {
         const last = elementsRef.current[elementsRef.current.length - 1];
@@ -526,8 +554,20 @@ export const App: React.FC = () => {
       } else if (e.code === 'Space' && !isSpacePressed.current) {
         isSpacePressed.current = true;
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedElementIds.length > 0 && !(e.target instanceof HTMLInputElement)) {
+        if (snappedShape) {
+          setSnappedShape(null);
+          setCurrentStroke([]);
+        } else if (selectedElementIds.length > 0 && !(e.target instanceof HTMLInputElement)) {
           handleDeleteSelected();
+        }
+      } else if (e.key === 'Escape') {
+        if (snappedShape) {
+          setSnappedShape(null);
+          setCurrentStroke([]);
+        }
+      } else if (e.key === 'Enter') {
+        if (snappedShape) {
+          finalizeCurrentSnappedShape();
         }
       } else if (e.key === 'Home') {
         handleRecenterBoard();
@@ -546,7 +586,7 @@ export const App: React.FC = () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [handleUndo, handleRedo, selectedElementIds]);
+  }, [handleUndo, handleRedo, selectedElementIds, finalizeCurrentSnappedShape, snappedShape]);
 
   // Image Paste (Ctrl+V)
   useEffect(() => {
@@ -639,11 +679,12 @@ export const App: React.FC = () => {
         }
       }
 
-      // 2. Active stroke or shape preview
-      if (isDrawing && currentStroke.length > 0) {
-        if (snappedShape) {
-          drawShape(ctx, snappedShape);
-        } else if (currentTool === 'shape') {
+      // 2. Dopasowany kształt w trybie edycji wierzchołków (styl Starnote) lub aktywny podgląd rysowania
+      if (snappedShape) {
+        drawShape(ctx, snappedShape);
+        drawSnappedShapeEditHandles(ctx, snappedShape, transform, activeSnappedVertexIndexRef.current);
+      } else if (isDrawing && currentStroke.length > 0) {
+        if (currentTool === 'shape') {
           const p0 = currentStroke[0];
           const pn = currentStroke[currentStroke.length - 1];
           const tempShape: ShapeElement = {
@@ -738,7 +779,7 @@ export const App: React.FC = () => {
     remoteCursors,
   ]);
 
-  // Auto Shape Detection & Hold-to-adjust (styl Procreate/GoodNotes: narysuj i przytrzymaj, aby dopasować i płynnie modyfikować)
+  // Auto Shape Detection & Hold-to-adjust (styl Starnote / Procreate)
   const triggerAutoShapeSnap = (snapPointerWorldPos?: Point) => {
     setCurrentStroke((latestPoints) => {
       if (latestPoints.length < 5) return latestPoints;
@@ -767,8 +808,33 @@ export const App: React.FC = () => {
           points: shapeEl.points ? shapeEl.points.map((p) => ({ ...p })) : undefined,
         };
         const lastPt = latestPoints[latestPoints.length - 1];
-        snapStartPointerRef.current =
+        const ptr =
           snapPointerWorldPos || (lastPt ? { x: lastPt.x, y: lastPt.y } : { x: detected.x, y: detected.y });
+        snapStartPointerRef.current = ptr;
+
+        // Ustal, który wierzchołek jest aktualnie trzymany przez rysik (styl Starnote)
+        if (shapeEl.shapeType === 'line' || shapeEl.shapeType === 'arrow' || shapeEl.shapeType === 'double_arrow') {
+          // Początek (0) zakotwiczony w miejscu startu, koniec (1) modyfikowany przez trzymanie
+          activeSnappedVertexIndexRef.current = 1;
+        } else if (shapeEl.shapeType === 'circle') {
+          // Środek zakotwiczony, promień (1) modyfikowany przez odległość rysika od środka
+          activeSnappedVertexIndexRef.current = 1;
+        } else {
+          // Trójkąt / Czworokąt / Wielokąt: wierzchołek najbliższy aktualnej pozycji rysika
+          const vertices = getShapeVertices(shapeEl);
+          if (vertices && vertices.length >= 3) {
+            let closestIdx = 0;
+            let minDist = Infinity;
+            vertices.forEach((v, idx) => {
+              const d = Math.hypot(ptr.x - v.x, ptr.y - v.y);
+              if (d < minDist) {
+                minDist = d;
+                closestIdx = idx;
+              }
+            });
+            activeSnappedVertexIndexRef.current = closestIdx;
+          }
+        }
 
         try {
           if (typeof navigator !== 'undefined' && navigator.vibrate) {
@@ -788,6 +854,21 @@ export const App: React.FC = () => {
 
     const { screenPos, worldPos } = getCanvasPoint(e);
     activePointers.current.set(e.pointerId, screenPos);
+
+    // Sprawdź czy użytkownik ma aktywny dopasowany kształt w trybie edycji wierzchołków (styl Starnote)
+    if (snappedShape) {
+      const hitVertex = getSnappedShapeVertexAtPoint(worldPos, snappedShape, transform);
+      if (hitVertex !== null) {
+        // Dotknięto wierzchołka: zacznij modyfikację tego konkretnego wierzchołka!
+        activeSnappedVertexIndexRef.current = hitVertex;
+        isAdjustingSnappedShapeRef.current = true;
+        snapStartPointerRef.current = worldPos;
+        return;
+      } else {
+        // Dotknięto poza wierzchołkami: zatwierdź kształt i kontynuuj nową akcję
+        finalizeCurrentSnappedShape();
+      }
+    }
 
     // 1. Right Click Panning on PC
     if (e.button === 2) {
@@ -1225,67 +1306,117 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Interaktywna modyfikacja dopasowanego kształtu podczas trzymania rysowania
-    if (isAdjustingSnappedShapeRef.current && snappedInitialShapeRef.current && snapStartPointerRef.current) {
-      const base = snappedInitialShapeRef.current;
-      const pStart = snapStartPointerRef.current;
-      const dx = worldPos.x - pStart.x;
-      const dy = worldPos.y - pStart.y;
+    // Interaktywna modyfikacja dopasowanego kształtu (styl Starnote / Procreate)
+    if (isAdjustingSnappedShapeRef.current && snappedShape) {
+      const activeIdx = activeSnappedVertexIndexRef.current ?? 1;
 
-      if (base.shapeType === 'line' || base.shapeType === 'arrow' || base.shapeType === 'double_arrow') {
-        if (base.points && base.points.length >= 2) {
-          const p0 = { x: base.points[0].x + dx, y: base.points[0].y + dy };
-          const p1 = { x: base.points[1].x + dx, y: base.points[1].y + dy };
-          const newMinX = Math.min(p0.x, p1.x);
-          const newMinY = Math.min(p0.y, p1.y);
-          const newWidth = Math.max(1, Math.abs(p1.x - p0.x));
-          const newHeight = Math.max(1, Math.abs(p1.y - p0.y));
-          setSnappedShape({
-            ...base,
-            x: newMinX,
-            y: newMinY,
-            width: newWidth,
-            height: newHeight,
-            points: [p0, p1],
-          });
+      if (snappedShape.shapeType === 'line' || snappedShape.shapeType === 'arrow' || snappedShape.shapeType === 'double_arrow') {
+        const pts =
+          snappedShape.points && snappedShape.points.length >= 2
+            ? snappedShape.points
+            : [
+                { x: snappedShape.x, y: snappedShape.y },
+                { x: snappedShape.x + snappedShape.width, y: snappedShape.y + snappedShape.height },
+              ];
+
+        // Użytkownik: "jeden koniec jest przymocowany do początku tam gdzie zacząłem rysować, a drugi mogę cały czas przemieścić"
+        let p0: Point;
+        let p1: Point;
+        if (activeIdx === 0) {
+          p0 = { x: Math.round(worldPos.x * 10) / 10, y: Math.round(worldPos.y * 10) / 10 };
+          p1 = pts[1];
+        } else {
+          p0 = pts[0];
+          p1 = { x: Math.round(worldPos.x * 10) / 10, y: Math.round(worldPos.y * 10) / 10 };
         }
-      } else if (base.shapeType === 'circle') {
-        const cx = base.x + base.width / 2;
-        const cy = base.y + base.height / 2;
-        const newRadius = Math.max(8, Math.round(Math.hypot(worldPos.x - cx, worldPos.y - cy)));
-        setSnappedShape({
-          ...base,
-          x: cx - newRadius,
-          y: cy - newRadius,
-          width: newRadius * 2,
-          height: newRadius * 2,
-        });
-      } else {
-        // Prostokąt, trójkąt, elipsa, wielokąt: skalowanie od środka
-        const cx = base.x + base.width / 2;
-        const cy = base.y + base.height / 2;
-        const initDist = Math.max(10, Math.hypot(pStart.x - cx, pStart.y - cy));
-        const currDist = Math.max(10, Math.hypot(worldPos.x - cx, worldPos.y - cy));
-        const scaleFactor = Math.max(0.15, Math.min(10, currDist / initDist));
-        const newWidth = Math.max(10, Math.round(base.width * scaleFactor));
-        const newHeight = Math.max(10, Math.round(base.height * scaleFactor));
-        const newPoints = base.points
-          ? base.points.map((p) => ({
-              x: Math.round(cx + (p.x - cx) * scaleFactor),
-              y: Math.round(cy + (p.y - cy) * scaleFactor),
-            }))
-          : undefined;
-
-        setSnappedShape({
-          ...base,
-          x: cx - newWidth / 2,
-          y: cy - newHeight / 2,
-          width: newWidth,
-          height: newHeight,
-          points: newPoints,
-        });
+        const newMinX = Math.min(p0.x, p1.x);
+        const newMinY = Math.min(p0.y, p1.y);
+        const newWidth = Math.max(1, Math.abs(p1.x - p0.x));
+        const newHeight = Math.max(1, Math.abs(p1.y - p0.y));
+        setSnappedShape((prev) =>
+          prev
+            ? {
+                ...prev,
+                x: newMinX,
+                y: newMinY,
+                width: newWidth,
+                height: newHeight,
+                points: [p0, p1],
+              }
+            : null
+        );
+        return;
       }
-      return;
+
+      if (snappedShape.shapeType === 'circle') {
+        // Użytkownik: "zmieniać promień okręgu, utrzymując jego środek w miejscu"
+        const cx = snappedShape.x + snappedShape.width / 2;
+        const cy = snappedShape.y + snappedShape.height / 2;
+        if (activeIdx === 1) {
+          // Zmiana promienia: środek (cx, cy) bezwzględnie w miejscu!
+          const newRadius = Math.max(8, Math.round(Math.hypot(worldPos.x - cx, worldPos.y - cy)));
+          setSnappedShape((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  x: cx - newRadius,
+                  y: cy - newRadius,
+                  width: newRadius * 2,
+                  height: newRadius * 2,
+                  points: [
+                    { x: cx, y: cy },
+                    { x: cx + newRadius, y: cy },
+                  ],
+                }
+              : null
+          );
+        } else if (activeIdx === 0) {
+          // Przemieszczenie całego okręgu za środek
+          const r = snappedShape.width / 2;
+          setSnappedShape((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  x: worldPos.x - r,
+                  y: worldPos.y - r,
+                  points: [
+                    { x: worldPos.x, y: worldPos.y },
+                    { x: worldPos.x + r, y: worldPos.y },
+                  ],
+                }
+              : null
+          );
+        }
+        return;
+      }
+
+      // Trójkąt / Czworokąt / Wielokąt (Użytkownik: "zaznaczone wszystkie wierzchołki i żeby mógł te wszystkie wierzchołki sobie zmodyfikować")
+      const vertices = getShapeVertices(snappedShape);
+      if (vertices && vertices.length >= 3) {
+        const nextVertices = vertices.map((v, i) =>
+          i === activeIdx ? { x: Math.round(worldPos.x), y: Math.round(worldPos.y) } : { ...v }
+        );
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const v of nextVertices) {
+          if (v.x < minX) minX = v.x;
+          if (v.x > maxX) maxX = v.x;
+          if (v.y < minY) minY = v.y;
+          if (v.y > maxY) maxY = v.y;
+        }
+        setSnappedShape((prev) =>
+          prev
+            ? {
+                ...prev,
+                x: minX,
+                y: minY,
+                width: Math.max(1, maxX - minX),
+                height: Math.max(1, maxY - minY),
+                points: nextVertices,
+              }
+            : null
+        );
+        return;
+      }
     }
 
     // Freehand stroke / shape drawing
@@ -1501,20 +1632,17 @@ export const App: React.FC = () => {
     }
 
     if (snappedShape) {
-      const myId = networkManagerRef.current?.getUserId() || 'me';
-      const shapeWithUser: ShapeElement = { ...snappedShape, userId: myId };
-      registerMyCreatedElement(shapeWithUser);
-      pushToHistory([...elementsRef.current.filter((e) => e.id !== shapeWithUser.id), shapeWithUser]);
-      networkManagerRef.current?.broadcast({ type: 'element_add', element: shapeWithUser });
-      setSnappedShape(null);
-      setCurrentStroke([]);
+      // W stylu Starnote:
+      // Po puszczeniu rysika kształt pozostaje aktywny z widocznymi wszystkimi wierzchołkami!
+      // Użytkownik widzi punkty kontrolne i może dotknąć i zmodyfikować każdy z nich przed zatwierdzeniem!
       isAdjustingSnappedShapeRef.current = false;
-      snappedInitialShapeRef.current = null;
-      snapStartPointerRef.current = null;
+      activeSnappedVertexIndexRef.current = null;
+      setCurrentStroke([]);
       return;
     }
 
     isAdjustingSnappedShapeRef.current = false;
+    activeSnappedVertexIndexRef.current = null;
     snappedInitialShapeRef.current = null;
     snapStartPointerRef.current = null;
 
@@ -2068,6 +2196,61 @@ export const App: React.FC = () => {
         </div>
       )}
 
+      {snappedShape && (
+        <div
+          className="glass-panel"
+          style={{
+            position: 'absolute',
+            top: 24,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            padding: '8px 18px',
+            borderRadius: 24,
+            background: 'rgba(15, 23, 42, 0.94)',
+            backdropFilter: 'blur(12px)',
+            border: '1px solid rgba(56, 189, 248, 0.45)',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.45)',
+            zIndex: 60,
+            color: '#f8fafc',
+            fontSize: 13,
+            fontWeight: 500,
+          }}
+        >
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, color: '#38bdf8' }}>
+            <span>📐</span> Edycja wierzchołków
+          </span>
+          <span style={{ color: '#475569' }}>|</span>
+          <span style={{ color: '#cbd5e1', fontSize: 12 }}>
+            Przeciągnij wierzchołki lub stuknij obok
+          </span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              finalizeCurrentSnappedShape();
+            }}
+            style={{
+              padding: '5px 14px',
+              background: '#0284c7',
+              color: '#ffffff',
+              borderRadius: 16,
+              border: 'none',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              boxShadow: '0 2px 8px rgba(2, 132, 199, 0.4)',
+            }}
+          >
+            Gotowe ✓
+          </button>
+        </div>
+      )}
+
       <Toolbar
         currentTool={currentTool}
         currentShape={currentShape}
@@ -2080,7 +2263,10 @@ export const App: React.FC = () => {
         connectedCount={connectedCount}
         selectedElementId={selectedElementIds.length > 0 ? selectedElementIds[0] : null}
         selectedElement={selectedElementIds.length === 1 ? elements.find((e) => e.id === selectedElementIds[0]) || null : null}
-        onToolChange={setCurrentTool}
+        onToolChange={(tool) => {
+          if (snappedShape) finalizeCurrentSnappedShape();
+          setCurrentTool(tool);
+        }}
         onShapeChange={setCurrentShape}
         onUpdateToolSetting={updateToolSetting}
         onToggleAutoShape={() => setAutoShapeEnabled((prev) => !prev)}

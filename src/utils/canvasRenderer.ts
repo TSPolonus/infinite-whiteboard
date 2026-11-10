@@ -1245,3 +1245,158 @@ export function eraseStrokePixels(
 
   return newStrokes;
 }
+
+/**
+ * Rysuje interaktywne wskaźniki wierzchołków dla dopasowanego kształtu (styl Starnote / Procreate)
+ * Pozwala użytkownikowi widzieć wszystkie wierzchołki kształtu i modyfikować każdy z nich przed zatwierdzeniem.
+ */
+export function drawSnappedShapeEditHandles(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeElement,
+  transform: ViewportTransform,
+  activeVertexIdx: number | null = null
+) {
+  const handleR = 9.5 / transform.scale;
+  ctx.save();
+
+  if (shape.shapeType === 'line' || shape.shapeType === 'arrow' || shape.shapeType === 'double_arrow') {
+    const pts =
+      shape.points && shape.points.length >= 2
+        ? shape.points
+        : [
+            { x: shape.x, y: shape.y },
+            { x: shape.x + shape.width, y: shape.y + shape.height },
+          ];
+
+    pts.forEach((p, idx) => {
+      const isActive = activeVertexIdx === idx;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, isActive ? handleR * 1.35 : handleR, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowColor = 'rgba(0,0,0,0.35)';
+      ctx.shadowBlur = 6 / transform.scale;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = isActive ? '#38bdf8' : '#0284c7';
+      ctx.lineWidth = 3 / transform.scale;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, handleR * 0.45, 0, Math.PI * 2);
+      ctx.fillStyle = isActive ? '#0284c7' : '#38bdf8';
+      ctx.fill();
+    });
+  } else if (shape.shapeType === 'circle') {
+    const cx = shape.x + shape.width / 2;
+    const cy = shape.y + shape.height / 2;
+    const r = shape.width / 2;
+
+    // Kotwica środka okręgu
+    ctx.beginPath();
+    ctx.arc(cx, cy, 5 / transform.scale, 0, Math.PI * 2);
+    ctx.fillStyle = '#38bdf8';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5 / transform.scale;
+    ctx.fill();
+    ctx.stroke();
+
+    // Uchwyt promienia na krawędzi
+    const rimX = cx + r;
+    const rimY = cy;
+    const isActive = activeVertexIdx === 1;
+
+    ctx.beginPath();
+    ctx.arc(rimX, rimY, isActive ? handleR * 1.35 : handleR, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = 'rgba(0,0,0,0.35)';
+    ctx.shadowBlur = 6 / transform.scale;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = isActive ? '#38bdf8' : '#0284c7';
+    ctx.lineWidth = 3 / transform.scale;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(rimX, rimY, handleR * 0.45, 0, Math.PI * 2);
+    ctx.fillStyle = isActive ? '#0284c7' : '#38bdf8';
+    ctx.fill();
+  } else {
+    // Wielokąty: Trójkąt, Kwadrat, Prostokąt, Pięciokąt, itp.
+    const vertices = getShapeVertices(shape);
+    if (vertices && vertices.length >= 3) {
+      vertices.forEach((p, idx) => {
+        const isActive = activeVertexIdx === idx;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, isActive ? handleR * 1.35 : handleR, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = 'rgba(0,0,0,0.35)';
+        ctx.shadowBlur = 6 / transform.scale;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = isActive ? '#38bdf8' : '#0284c7';
+        ctx.lineWidth = 3 / transform.scale;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, handleR * 0.45, 0, Math.PI * 2);
+        ctx.fillStyle = isActive ? '#0284c7' : '#38bdf8';
+        ctx.fill();
+      });
+    }
+  }
+
+  ctx.restore();
+}
+
+/**
+ * Sprawdza, czy punkt kliknięcia/dotknięcia trafił w którykolwiek wierzchołek dopasowanego kształtu
+ */
+export function getSnappedShapeVertexAtPoint(
+  worldPos: Point,
+  shape: ShapeElement,
+  transform: ViewportTransform
+): number | null {
+  const threshold = 26 / transform.scale;
+
+  if (shape.shapeType === 'line' || shape.shapeType === 'arrow' || shape.shapeType === 'double_arrow') {
+    const pts =
+      shape.points && shape.points.length >= 2
+        ? shape.points
+        : [
+            { x: shape.x, y: shape.y },
+            { x: shape.x + shape.width, y: shape.y + shape.height },
+          ];
+    for (let i = 0; i < pts.length; i++) {
+      if (Math.hypot(worldPos.x - pts[i].x, worldPos.y - pts[i].y) <= threshold) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  if (shape.shapeType === 'circle') {
+    const cx = shape.x + shape.width / 2;
+    const cy = shape.y + shape.height / 2;
+    const r = shape.width / 2;
+    // Uchwyt promienia (krawędź)
+    if (Math.hypot(worldPos.x - (cx + r), worldPos.y - cy) <= threshold) {
+      return 1;
+    }
+    // Uchwyt środka
+    if (Math.hypot(worldPos.x - cx, worldPos.y - cy) <= threshold) {
+      return 0;
+    }
+    return null;
+  }
+
+  const vertices = getShapeVertices(shape);
+  if (vertices && vertices.length >= 3) {
+    for (let i = 0; i < vertices.length; i++) {
+      if (Math.hypot(worldPos.x - vertices[i].x, worldPos.y - vertices[i].y) <= threshold) {
+        return i;
+      }
+    }
+  }
+
+  return null;
+}
