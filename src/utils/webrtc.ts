@@ -1,5 +1,5 @@
-import { Peer } from 'peerjs';
-import type { DataConnection } from 'peerjs';
+import mqtt from 'mqtt';
+import type { MqttClient } from 'mqtt';
 import type {
   CanvasElement,
   BoardSettings,
@@ -25,31 +25,6 @@ export function generateRoomCode(): string {
   return result;
 }
 
-const PEER_CONFIG = {
-  config: {
-    iceServers: [
-      // Google Public STUN (błyskawiczne UDP, wysoka dostępność)
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' },
-      // Cloudflare Public STUN
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      // Twilio Global STUN (AWS Europe / USA)
-      { urls: 'stun:global.stun.twilio.com:3478' },
-      // Nextcloud STUN (port 443 HTTPS & port 3478)
-      { urls: 'stun:stun.nextcloud.com:443' },
-      { urls: 'stun:stun.nextcloud.com:3478' },
-      // Syncthing STUN
-      { urls: 'stun:stun.syncthing.net:3478' },
-    ],
-    iceCandidatePoolSize: 10,
-  },
-};
-
-const CHUNK_SIZE = 4000; // 4KB per chunk - safely below PeerJS 16KB internal MTU and WebRTC 64KB SCTP limit
-
 export interface NetworkCallbacks {
   onElementAdd: (el: CanvasElement) => void;
   onElementUpdate: (el: CanvasElement) => void;
@@ -65,18 +40,35 @@ export interface NetworkCallbacks {
   onNetworkError?: (msg: string) => void;
 }
 
+interface WireEnvelope {
+  senderId: string;
+  senderName: string;
+  msg: NetworkMessage;
+}
+
+// Globalne, bezpieczne brokery WebSocket WSS (port 443/8084/8884)
+// Działają w 100% pomiędzy różnymi sieciami Wi-Fi, LTE, hotspotami i za zaporami NAT
+const CLOUD_BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt',
+];
+
 export class BoardNetworkManager {
-  private peer: Peer | null = null;
-  private connections: Map<string, DataConnection> = new Map();
+  private client: MqttClient | null = null;
+  private currentBrokerIndex: number = 0;
   private isHost: boolean = false;
   private myUserId: string = '';
   private myUserName: string = 'Użytkownik';
   private callbacks: NetworkCallbacks;
   private currentBoardProvider: () => { elements: CanvasElement[]; settings: BoardSettings };
   private roomCode: string = '';
-  private heartbeatTimer: number | null = null;
-  private chunkBuffers: Map<string, { chunks: string[]; received: number; total: number }> = new Map();
+  private knownPeers: Map<string, { name: string; lastSeen: number }> = new Map();
   private pendingQueue: NetworkMessage[] = [];
+  private heartbeatTimer: number | null = null;
+  private cleanupTimer: number | null = null;
+  private joinAckTimer: number | null = null;
+  private passwordAttempt?: string;
+  private hasReceivedJoinAck: boolean = false;
 
   constructor(
     callbacks: NetworkCallbacks,
@@ -84,7 +76,7 @@ export class BoardNetworkManager {
   ) {
     this.callbacks = callbacks;
     this.currentBoardProvider = currentBoardProvider;
-    this.myUserId = 'u' + Math.random().toString(36).substring(2, 6);
+    this.myUserId = 'u_' + Math.random().toString(36).substring(2, 9);
   }
 
   public getUserId(): string {
@@ -97,211 +89,201 @@ export class BoardNetworkManager {
 
   public connect(roomCode: string, passwordAttempt?: string) {
     this.roomCode = roomCode.toUpperCase().trim();
+    this.passwordAttempt = passwordAttempt;
     this.disconnect();
     this.callbacks.onConnectionStatusChange('connecting');
 
     const cleanCode = this.roomCode.replace(/[^A-Z0-9]/g, '');
-    const hostPeerId = `inf2-${cleanCode}-host`;
-    const clientPeerId = `inf2-${cleanCode}-${this.myUserId}`;
-
-    const clientPeer = new Peer(clientPeerId, PEER_CONFIG);
-    this.peer = clientPeer;
-
-    clientPeer.on('open', () => {
-      this.connectToHost(clientPeer, hostPeerId, cleanCode, passwordAttempt);
-    });
-
-    clientPeer.on('error', (err) => {
-      if (err.type === 'peer-unavailable' || err.type === 'socket-error') {
-        this.initAsHost(cleanCode);
-      }
-    });
+    this.currentBrokerIndex = 0;
+    this.initMqttConnection(cleanCode, 0);
   }
 
-  private connectToHost(
-    peer: Peer,
-    hostPeerId: string,
-    cleanCode: string,
-    passwordAttempt?: string
-  ) {
-    if (this.isHost || !peer || peer.destroyed) return;
+  private initMqttConnection(cleanCode: string, brokerIdx: number) {
+    const brokerUrl = CLOUD_BROKERS[brokerIdx % CLOUD_BROKERS.length];
+    this.hasReceivedJoinAck = false;
 
-    const existingConn = this.connections.get(hostPeerId);
-    if (existingConn && existingConn.open) return;
-
-    const conn = peer.connect(hostPeerId, {
-      reliable: true,
-    });
-
-    let connectedToHost = false;
-
-    conn.on('open', () => {
-      connectedToHost = true;
-      this.isHost = false;
-      this.connections.set(hostPeerId, conn);
-      this.callbacks.onConnectionStatusChange('connected');
-      this.startHeartbeat();
-
-      this.sendSafe(conn, {
-        type: 'join',
-        userId: this.myUserId,
-        userName: this.myUserName,
-        password: passwordAttempt,
+    try {
+      const client = mqtt.connect(brokerUrl, {
+        clientId: `inf4_${cleanCode}_${this.myUserId}_${Math.random().toString(36).substring(2, 6)}`,
+        clean: true,
+        connectTimeout: 8000,
+        reconnectPeriod: 2500,
+        keepalive: 30,
       });
 
-      this.flushPendingQueue(conn);
-    });
+      this.client = client;
 
-    conn.on('data', (data) => {
-      this.handleRawData(data, conn);
-    });
+      const broadcastTopic = `infdraw/v4/${cleanCode}/broadcast`;
+      const directTopic = `infdraw/v4/${cleanCode}/direct/${this.myUserId}`;
 
-    conn.on('close', () => {
-      this.connections.delete(hostPeerId);
-      this.callbacks.onPeerLeave(hostPeerId);
-    });
+      client.on('connect', () => {
+        // Subskrybuj kanał wspólny pokoju oraz kanał wiadomości bezpośrednich
+        client.subscribe([broadcastTopic, directTopic], { qos: 0 }, (err) => {
+          if (err) {
+            console.warn('Błąd subskrypcji kanałów MQTT:', err);
+            return;
+          }
 
-    conn.on('error', (err) => {
-      console.warn('Client connection notice:', err);
-    });
+          // Wyślij powitanie i zgłoszenie chęci dołączenia (Join request)
+          this.publishToTopic(broadcastTopic, {
+            type: 'join',
+            userId: this.myUserId,
+            userName: this.myUserName,
+            password: this.passwordAttempt,
+          });
 
-    setTimeout(() => {
-      if (!connectedToHost && this.peer === peer && !peer.destroyed && this.connections.size === 0) {
-        this.initAsHost(cleanCode);
-      }
-    }, 12000);
-  }
+          // Jeśli w ciągu 2.2s nikt nie odpowie (brak istniejących uczestników), stajemy się Hostem
+          if (this.joinAckTimer) clearTimeout(this.joinAckTimer);
+          this.joinAckTimer = window.setTimeout(() => {
+            if (!this.hasReceivedJoinAck) {
+              this.isHost = true;
+              this.callbacks.onConnectionStatusChange('host');
+            }
+          }, 2200);
 
-  public initAsHost(cleanCode: string) {
-    if (this.peer) {
-      try {
-        this.peer.destroy();
-      } catch (e) {}
+          this.startHeartbeat();
+          this.flushPendingQueue();
+        });
+      });
+
+      client.on('message', (_topic: string, payload: Uint8Array) => {
+        try {
+          const rawStr = new TextDecoder('utf-8').decode(payload);
+          const envelope: WireEnvelope = JSON.parse(rawStr);
+
+          // Ignoruj echo własnych wiadomości
+          if (envelope.senderId === this.myUserId) {
+            return;
+          }
+
+          // Zaktualizuj obecność nadawcy w lobby
+          this.updatePeerPresence(envelope.senderId, envelope.senderName);
+
+          // Przetwórz treść komunikatu
+          this.handleNetworkMessage(envelope.msg, envelope.senderId);
+        } catch (e) {
+          console.warn('Błąd parsowania wiadomości sieciowej:', e);
+        }
+      });
+
+      client.on('error', (err) => {
+        console.warn(`MQTT błąd brokera [${brokerUrl}]:`, err);
+        // Jeśli pierwszy broker ma problem, przełącz na rezerwowy broker WSS
+        if (brokerIdx === 0 && this.currentBrokerIndex === 0) {
+          this.currentBrokerIndex = 1;
+          try {
+            client.end(true);
+          } catch (e) {}
+          this.initMqttConnection(cleanCode, 1);
+        }
+      });
+
+      client.on('close', () => {
+        // Połączenie chwilowo zamknięte (np. minimalizacja karty na tablecie)
+      });
+
+      client.on('reconnect', () => {
+        // Wznowiono połączenie po wyjściu z aparatu/galerii
+        this.flushPendingQueue();
+      });
+    } catch (err) {
+      console.error('Nieudana inicjalizacja klienta MQTT:', err);
     }
+  }
 
-    const hostPeerId = `inf2-${cleanCode}-host`;
-    const hostPeer = new Peer(hostPeerId, PEER_CONFIG);
-    this.peer = hostPeer;
-    this.isHost = true;
+  private updatePeerPresence(peerId: string, peerName: string) {
+    const isNew = !this.knownPeers.has(peerId);
+    this.knownPeers.set(peerId, { name: peerName || 'Uczestnik', lastSeen: Date.now() });
 
-    hostPeer.on('open', () => {
-      this.callbacks.onConnectionStatusChange('host');
-      this.startHeartbeat();
-    });
-
-    hostPeer.on('connection', (conn) => {
-      conn.on('open', () => {
-        // Connected
-      });
-
-      conn.on('data', async (data) => {
-        this.handleRawData(data, conn);
-      });
-
-      conn.on('close', () => {
-        this.connections.delete(conn.peer);
-        this.callbacks.onPeerLeave(conn.peer);
-      });
-
-      conn.on('error', (err) => {
-        console.warn('Host conn warning', err);
-      });
-    });
-
-    hostPeer.on('error', (err) => {
-      console.warn('Host peer warning', err);
-    });
+    if (isNew) {
+      this.callbacks.onPeerJoin(peerId, peerName || 'Uczestnik');
+      this.callbacks.onConnectionStatusChange(this.isHost ? 'host' : 'connected');
+    }
   }
 
   private startHeartbeat() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+
+    const cleanCode = this.roomCode.replace(/[^A-Z0-9]/g, '');
+    const broadcastTopic = `infdraw/v4/${cleanCode}/broadcast`;
+
+    // 1. Regularny Heartbeat co 4 sekundy
     this.heartbeatTimer = window.setInterval(() => {
-      this.broadcast({ type: 'ping' });
-    }, 5000);
+      this.publishToTopic(broadcastTopic, { type: 'ping' });
+    }, 4000);
+
+    // 2. Czyszczenie nieaktywnych uczestników co 2 sekundy (timeout 14s)
+    this.cleanupTimer = window.setInterval(() => {
+      const now = Date.now();
+      for (const [peerId, info] of this.knownPeers) {
+        if (now - info.lastSeen > 14000) {
+          this.knownPeers.delete(peerId);
+          this.callbacks.onPeerLeave(peerId);
+        }
+      }
+
+      // Jeśli wszyscy opuścili pokój, przejmij rolę Hosta
+      if (this.knownPeers.size === 0 && !this.isHost) {
+        this.isHost = true;
+        this.callbacks.onConnectionStatusChange('host');
+      }
+    }, 2000);
   }
 
-  // Handle incoming data, supporting fragmented chunks
-  private handleRawData(raw: any, conn: DataConnection) {
-    if (!raw) return;
+  private async handleNetworkMessage(msg: NetworkMessage, senderId: string) {
+    const cleanCode = this.roomCode.replace(/[^A-Z0-9]/g, '');
 
-    if (raw.type === 'chunk') {
-      const { msgId, chunkIndex, totalChunks, data } = raw;
-      let buffer = this.chunkBuffers.get(msgId);
-      if (!buffer) {
-        buffer = { chunks: new Array(totalChunks), received: 0, total: totalChunks };
-        this.chunkBuffers.set(msgId, buffer);
-        setTimeout(() => {
-          this.chunkBuffers.delete(msgId);
-        }, 15000);
-      }
+    // Nowy uczestnik prosi o dołączenie do lobby
+    if (msg.type === 'join') {
+      const activePeers = Array.from(this.knownPeers.keys());
+      const allIds = [this.myUserId, ...activePeers].sort();
 
-      buffer.chunks[chunkIndex] = data;
-      buffer.received++;
+      // Odpowiada Host lub uczestnik z najmniejszym ID, aby uniknąć zdublowanych odpowiedzi
+      if (this.isHost || allIds[0] === this.myUserId) {
+        const { settings, elements } = this.currentBoardProvider();
+        const directTargetTopic = `infdraw/v4/${cleanCode}/direct/${senderId}`;
 
-      if (buffer.received === buffer.total) {
-        const fullJson = buffer.chunks.join('');
-        this.chunkBuffers.delete(msgId);
-        try {
-          const parsed = JSON.parse(fullJson);
-          this.processMessage(parsed, conn);
-        } catch (e) {
-          console.error('Failed to parse reassembled message', e);
-        }
-      }
-      return;
-    }
+        // Weryfikacja hasła pokoju
+        if (settings.isPasswordProtected && settings.passwordHash) {
+          if (!msg.password) {
+            this.publishToTopic(directTargetTopic, {
+              type: 'join_ack',
+              success: false,
+              error: 'PASSWORD_REQUIRED',
+            });
+            return;
+          }
 
-    this.processMessage(raw as NetworkMessage, conn);
-  }
-
-  private async processMessage(msg: NetworkMessage, conn: DataConnection) {
-    if (msg.type === 'ping') {
-      this.sendSafe(conn, { type: 'pong' });
-      return;
-    }
-    if (msg.type === 'pong') {
-      return;
-    }
-
-    // Host processes join request
-    if (this.isHost && msg.type === 'join') {
-      const { settings, elements } = this.currentBoardProvider();
-
-      if (settings.isPasswordProtected && settings.passwordHash) {
-        if (!msg.password) {
-          this.sendSafe(conn, {
-            type: 'join_ack',
-            success: false,
-            error: 'PASSWORD_REQUIRED',
-          });
-          return;
+          const inputHash = await hashPassword(msg.password);
+          if (inputHash !== settings.passwordHash) {
+            this.publishToTopic(directTargetTopic, {
+              type: 'join_ack',
+              success: false,
+              error: 'INVALID_PASSWORD',
+            });
+            return;
+          }
         }
 
-        const inputHash = await hashPassword(msg.password);
-        if (inputHash !== settings.passwordHash) {
-          this.sendSafe(conn, {
-            type: 'join_ack',
-            success: false,
-            error: 'INVALID_PASSWORD',
-          });
-          return;
-        }
+        // Pomyślna autoryzacja: odeślij stan tablicy
+        this.publishToTopic(directTargetTopic, {
+          type: 'join_ack',
+          success: true,
+          board: { elements, settings },
+        });
       }
-
-      this.connections.set(conn.peer, conn);
-      this.callbacks.onPeerJoin(conn.peer, msg.userName);
-
-      this.sendSafe(conn, {
-        type: 'join_ack',
-        success: true,
-        board: { elements, settings },
-      });
-      this.flushPendingQueue(conn);
       return;
     }
 
     switch (msg.type) {
       case 'join_ack': {
+        this.hasReceivedJoinAck = true;
+        if (this.joinAckTimer) {
+          clearTimeout(this.joinAckTimer);
+          this.joinAckTimer = null;
+        }
+
         if (!msg.success) {
           if (msg.error === 'PASSWORD_REQUIRED') {
             this.callbacks.onPasswordRequired();
@@ -311,10 +293,13 @@ export class BoardNetworkManager {
           return;
         }
 
+        this.isHost = false;
+        this.callbacks.onConnectionStatusChange('connected');
+
         if (msg.board) {
           this.callbacks.onBoardSync(msg.board.elements, msg.board.settings);
         }
-        this.flushPendingQueue(conn);
+        this.flushPendingQueue();
         break;
       }
 
@@ -335,7 +320,6 @@ export class BoardNetworkManager {
         break;
 
       case 'laser_stroke': {
-        // Tag with local reception time to eliminate clock skew!
         const now = Date.now();
         const adjustedPoints = msg.points.map((p) => ({ ...p, receivedAt: now }));
         this.callbacks.onLaserStroke(adjustedPoints);
@@ -346,146 +330,71 @@ export class BoardNetworkManager {
         this.callbacks.onCursorMove(msg.cursor);
         break;
 
+      case 'ping':
+      case 'pong':
+        break;
+
       case 'board_settings_update':
         break;
     }
-
-    // Host forwards message to all other connected peers
-    if (this.isHost) {
-      this.broadcastExcept(msg, conn.peer);
-    }
   }
 
-  // Safe chunked sender: splits large payloads into safe 8KB fragments
-  // Checks dataChannel.bufferedAmount to prevent buffer congestion on tablets/mobile
-  public sendSafe(conn: DataConnection, msg: NetworkMessage) {
-    if (!conn || !conn.open) return;
+  private publishToTopic(topic: string, msg: NetworkMessage) {
+    if (!this.client || !this.client.connected) {
+      if (
+        msg.type === 'element_add' ||
+        msg.type === 'element_update' ||
+        msg.type === 'element_delete' ||
+        msg.type === 'board_sync'
+      ) {
+        this.pendingQueue.push(msg);
+      }
+      return;
+    }
+
+    const envelope: WireEnvelope = {
+      senderId: this.myUserId,
+      senderName: this.myUserName,
+      msg,
+    };
 
     try {
-      const jsonStr = JSON.stringify(msg);
-
-      if (jsonStr.length <= CHUNK_SIZE) {
-        // Small message: send directly
-        try {
-          conn.send(msg);
-        } catch (e) {
-          console.warn('sendSafe direct send warning', e);
-        }
-      } else {
-        // Large message: split into 8KB chunks and send one by one with backpressure check
-        const totalChunks = Math.ceil(jsonStr.length / CHUNK_SIZE);
-        const msgId = 'm_' + Math.random().toString(36).substring(2, 9);
-        this.sendSingleChunk(conn, jsonStr, msgId, totalChunks, 0);
-      }
-    } catch (e) {
-      console.warn('sendSafe serialization error', e);
-    }
-  }
-
-  private sendSingleChunk(
-    conn: DataConnection,
-    jsonStr: string,
-    msgId: string,
-    totalChunks: number,
-    index: number
-  ) {
-    if (!conn || !conn.open) return;
-
-    // Check PeerJS underlying RTCDataChannel buffer
-    const dc = (conn as any).dataChannel as RTCDataChannel | undefined;
-    const buffered = dc?.bufferedAmount ?? 0;
-    const MAX_BUFFER = 16384; // 16KB threshold for mobile devices
-
-    if (buffered > MAX_BUFFER) {
-      // Buffer is congested: wait 25ms for buffer to clear before sending next chunk
-      setTimeout(() => {
-        this.sendSingleChunk(conn, jsonStr, msgId, totalChunks, index);
-      }, 25);
-      return;
-    }
-
-    const slice = jsonStr.substring(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE);
-    try {
-      conn.send({
-        type: 'chunk',
-        msgId,
-        chunkIndex: index,
-        totalChunks,
-        data: slice,
-      });
-    } catch (e) {
-      console.warn(`sendSafe chunk ${index}/${totalChunks} warning`, e);
-      return;
-    }
-
-    if (index + 1 < totalChunks) {
-      // Send next chunk with 15ms spacing so mobile network stack can dispatch packets cleanly
-      setTimeout(() => {
-        this.sendSingleChunk(conn, jsonStr, msgId, totalChunks, index + 1);
-      }, 15);
-    }
-  }
-
-  public ensureConnection(roomCode: string) {
-    if (!this.peer || this.peer.destroyed) {
-      this.connect(roomCode);
-      return;
-    }
-    if (this.peer.disconnected) {
-      this.peer.reconnect();
-    }
-    // Jeśli klient utracił połączenie z hostem (np. powrót z aparatu/galerii na tablecie)
-    if (!this.isHost && this.peer && !this.peer.destroyed) {
-      const cleanCode = (roomCode || this.roomCode).replace(/[^A-Z0-9]/g, '');
-      const hostPeerId = `inf2-${cleanCode}-host`;
-      const conn = this.connections.get(hostPeerId);
-      if (!conn || !conn.open) {
-        this.connectToHost(this.peer, hostPeerId, cleanCode);
-      }
+      const payloadStr = JSON.stringify(envelope);
+      this.client.publish(topic, payloadStr, { qos: 0 });
+    } catch (err) {
+      console.warn('Błąd publikacji wiadomości MQTT:', err);
     }
   }
 
   public broadcast(msg: NetworkMessage) {
-    let sentCount = 0;
-    for (const [, conn] of this.connections) {
-      if (conn && conn.open) {
-        this.sendSafe(conn, msg);
-        sentCount++;
-      }
-    }
-
-    // Jeśli połączenie jest chwilowo wznawiane (np. powrót z aparatu/galerii Huawei),
-    // zakolejkuj element, aby wysłać go natychmiast po re-handshake
-    if (
-      sentCount === 0 &&
-      (msg.type === 'element_add' ||
-        msg.type === 'element_update' ||
-        msg.type === 'element_delete' ||
-        msg.type === 'board_sync')
-    ) {
-      this.pendingQueue.push(msg);
-    }
+    const cleanCode = this.roomCode.replace(/[^A-Z0-9]/g, '');
+    const broadcastTopic = `infdraw/v4/${cleanCode}/broadcast`;
+    this.publishToTopic(broadcastTopic, msg);
   }
 
-  private flushPendingQueue(conn: DataConnection) {
-    if (this.pendingQueue.length === 0 || !conn || !conn.open) return;
+  private flushPendingQueue() {
+    if (this.pendingQueue.length === 0 || !this.client || !this.client.connected) return;
     const queued = [...this.pendingQueue];
     this.pendingQueue = [];
     for (const m of queued) {
-      this.sendSafe(conn, m);
+      this.broadcast(m);
     }
   }
 
-  private broadcastExcept(msg: NetworkMessage, excludePeerId: string) {
-    for (const [peerId, conn] of this.connections) {
-      if (peerId !== excludePeerId) {
-        this.sendSafe(conn, msg);
-      }
+  public ensureConnection(roomCode: string) {
+    const cleanCode = (roomCode || this.roomCode).replace(/[^A-Z0-9]/g, '');
+    if (!this.client) {
+      this.connect(cleanCode, this.passwordAttempt);
+      return;
     }
+    if (this.client.disconnected) {
+      this.client.reconnect();
+    }
+    this.flushPendingQueue();
   }
 
   public getConnectedCount(): number {
-    return this.connections.size + 1;
+    return this.knownPeers.size + 1;
   }
 
   public disconnect() {
@@ -493,20 +402,23 @@ export class BoardNetworkManager {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-
-    for (const [, conn] of this.connections) {
-      try {
-        conn.close();
-      } catch (e) {}
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
     }
-    this.connections.clear();
-    this.chunkBuffers.clear();
+    if (this.joinAckTimer) {
+      clearTimeout(this.joinAckTimer);
+      this.joinAckTimer = null;
+    }
 
-    if (this.peer) {
+    this.knownPeers.clear();
+    this.pendingQueue = [];
+
+    if (this.client) {
       try {
-        this.peer.destroy();
+        this.client.end(true);
       } catch (e) {}
-      this.peer = null;
+      this.client = null;
     }
 
     this.callbacks.onConnectionStatusChange('disconnected');
