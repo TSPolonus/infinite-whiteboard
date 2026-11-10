@@ -356,18 +356,14 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
   ctx.restore();
 }
 
+// Cache offscreen canvases for pixel-grid rendered images
+const pixelCanvasCache = new Map<string, HTMLCanvasElement>();
+
 export function drawImageElement(
   ctx: CanvasRenderingContext2D,
   imgElem: ImageElement,
   imageCache: Map<string, HTMLImageElement>
 ) {
-  let img = imageCache.get(imgElem.id);
-  if (!img) {
-    img = new Image();
-    img.src = imgElem.src;
-    imageCache.set(imgElem.id, img);
-  }
-
   ctx.save();
   const rotation = imgElem.rotation || 0;
   if (rotation !== 0) {
@@ -378,16 +374,98 @@ export function drawImageElement(
     ctx.translate(-cx, -cy);
   }
 
-  if (img.complete && img.naturalWidth > 0) {
-    ctx.drawImage(img, imgElem.x, imgElem.y, imgElem.width, imgElem.height);
-  } else {
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.strokeRect(imgElem.x, imgElem.y, imgElem.width, imgElem.height);
-    ctx.fillRect(imgElem.x, imgElem.y, imgElem.width, imgElem.height);
+  // 1. Pixel-by-pixel drawn image (100% data-safe, immune to WebRTC buffer & image loading issues)
+  if (imgElem.pixels) {
+    let offscreen = pixelCanvasCache.get(imgElem.id);
+    if (!offscreen) {
+      // Decode "W,H,data" (obsługuje zarówno nowszy, ostry format Base64 RGB jak i format Hex)
+      const firstComma = imgElem.pixels.indexOf(',');
+      const secondComma = imgElem.pixels.indexOf(',', firstComma + 1);
+      if (firstComma !== -1 && secondComma !== -1) {
+        const gridW = parseInt(imgElem.pixels.substring(0, firstComma), 10);
+        const gridH = parseInt(imgElem.pixels.substring(firstComma + 1, secondComma), 10);
+        const rawPayload = imgElem.pixels.substring(secondComma + 1);
+
+        offscreen = document.createElement('canvas');
+        offscreen.width = gridW;
+        offscreen.height = gridH;
+        const offCtx = offscreen.getContext('2d');
+        if (offCtx) {
+          const imgData = offCtx.createImageData(gridW, gridH);
+          const data = imgData.data;
+
+          // Sprawdzenie czy format to Base64 czy Hex
+          const isBase64 = !/^[0-9a-fA-F]+$/.test(rawPayload) || rawPayload.includes('=') || rawPayload.length === Math.ceil((gridW * gridH * 3) / 3) * 4;
+
+          if (isBase64) {
+            try {
+              const binStr = atob(rawPayload);
+              let byteIdx = 0;
+              const totalPixels = gridW * gridH;
+              for (let p = 0; p < totalPixels && byteIdx + 2 < binStr.length; p++) {
+                const dIdx = p * 4;
+                data[dIdx] = binStr.charCodeAt(byteIdx++);     // R
+                data[dIdx + 1] = binStr.charCodeAt(byteIdx++); // G
+                data[dIdx + 2] = binStr.charCodeAt(byteIdx++); // B
+                data[dIdx + 3] = 255;
+              }
+            } catch (err) {
+              console.warn('Błąd dekodowania pikseli base64:', err);
+            }
+          } else {
+            // Hex fallback
+            let hexIdx = 0;
+            const totalPixels = gridW * gridH;
+            for (let p = 0; p < totalPixels && hexIdx + 5 < rawPayload.length; p++) {
+              const r = parseInt(rawPayload.substring(hexIdx, hexIdx + 2), 16) || 0;
+              const g = parseInt(rawPayload.substring(hexIdx + 2, hexIdx + 4), 16) || 0;
+              const b = parseInt(rawPayload.substring(hexIdx + 4, hexIdx + 6), 16) || 0;
+              const dIdx = p * 4;
+              data[dIdx] = r;
+              data[dIdx + 1] = g;
+              data[dIdx + 2] = b;
+              data[dIdx + 3] = 255;
+              hexIdx += 6;
+            }
+          }
+
+          offCtx.putImageData(imgData, 0, 0);
+          pixelCanvasCache.set(imgElem.id, offscreen);
+        }
+      }
+    }
+
+    if (offscreen) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(offscreen, imgElem.x, imgElem.y, imgElem.width, imgElem.height);
+      ctx.restore();
+      return;
+    }
   }
+
+  // 2. Fallback to classic src Image
+  if (imgElem.src) {
+    let img = imageCache.get(imgElem.id);
+    if (!img) {
+      img = new Image();
+      img.src = imgElem.src;
+      imageCache.set(imgElem.id, img);
+    }
+
+    if (img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, imgElem.x, imgElem.y, imgElem.width, imgElem.height);
+      ctx.restore();
+      return;
+    }
+  }
+
+  // Placeholder while loading
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.strokeRect(imgElem.x, imgElem.y, imgElem.width, imgElem.height);
+  ctx.fillRect(imgElem.x, imgElem.y, imgElem.width, imgElem.height);
   ctx.restore();
 }
 

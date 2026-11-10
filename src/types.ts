@@ -57,7 +57,9 @@ export interface ImageElement {
   y: number;
   width: number;
   height: number;
-  src: string;
+  src?: string;
+  pixels?: string; // Format: "W,H,hexhexhex..." - pixel-drawn raster without <img> dependency
+  gridSize?: number;
   aspectRatio: number;
   rotation?: number;
   timestamp: number;
