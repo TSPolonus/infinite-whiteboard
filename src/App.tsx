@@ -314,12 +314,15 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Join Room by Code
+  // Join Room by Code (bezpieczne przejście bez podwójnego montowania)
   const handleJoinRoomByCode = (newCode: string) => {
     const clean = newCode.toUpperCase().trim();
-    window.location.hash = `room=${clean}`;
-    setBoardSettings((prev) => ({ ...prev, id: clean, roomCode: clean }));
-    initNetworking(clean);
+    if (clean === boardSettings.roomCode) {
+      initNetworking(clean);
+    } else {
+      window.location.hash = `room=${clean}`;
+      setBoardSettings((prev) => ({ ...prev, id: clean, roomCode: clean }));
+    }
     setIsShareModalOpen(false);
   };
 
@@ -1323,6 +1326,7 @@ export const App: React.FC = () => {
   // Universal high-definition image loader (minimum 720p HD)
   // Handles native mobile camera formats, EXIF, and prevents WebRTC disconnects
   const handleImageUpload = async (file: File) => {
+    if (!file) return;
     try {
       showToastRef.current('Wczytywanie zdjęcia...');
       let sourceWidth = 0;
@@ -1337,45 +1341,33 @@ export const App: React.FC = () => {
           sourceWidth = bitmap.width;
           sourceHeight = bitmap.height;
           drawSource = bitmap;
-          cleanup = () => bitmap.close();
+          cleanup = () => {
+            try {
+              bitmap.close();
+            } catch (e) {}
+          };
         } catch (bitmapErr) {
           console.warn('createImageBitmap fallback', bitmapErr);
         }
       }
 
-      // 2. Fallback to HTMLImageElement if createImageBitmap is unavailable
+      // 2. Fallback to FileReader + HTMLImageElement if createImageBitmap is unavailable or fails on mobile camera
       if (!drawSource) {
-        let url = '';
-        try {
-          url = URL.createObjectURL(file);
-          cleanup = () => URL.revokeObjectURL(url);
-        } catch (e) {}
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error('Błąd odczytu pliku przez FileReader'));
+          reader.readAsDataURL(file);
+        });
 
         const img = await new Promise<HTMLImageElement>((resolve, reject) => {
           const image = new Image();
           image.onload = () => resolve(image);
-          image.onerror = () => {
-            // Last resort: FileReader data URL
-            const reader = new FileReader();
-            reader.onload = (e) => {
-              const image2 = new Image();
-              image2.onload = () => resolve(image2);
-              image2.onerror = reject;
-              image2.src = e.target?.result as string;
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          };
-          if (url) {
-            image.src = url;
-          } else {
-            const reader = new FileReader();
-            reader.onload = (e) => { image.src = e.target?.result as string; };
-            reader.readAsDataURL(file);
-          }
+          image.onerror = (e) => reject(e);
+          image.src = dataUrl;
         });
-        sourceWidth = img.naturalWidth || 400;
-        sourceHeight = img.naturalHeight || 300;
+        sourceWidth = img.naturalWidth || 600;
+        sourceHeight = img.naturalHeight || 400;
         drawSource = img;
       }
 
@@ -1409,13 +1401,16 @@ export const App: React.FC = () => {
       if (cleanup) cleanup();
 
       // Optimize JPEG quality for 720p:
-      // High visual quality (0.74). If base64 length exceeds 95,000 chars (~70KB),
+      // High visual quality (0.76). If base64 length exceeds 95,000 chars (~70KB),
       // adaptively steps down to ensure zero WebRTC buffer overflows.
-      let quality = 0.74;
+      let quality = 0.76;
       let compressedData = hdCanvas.toDataURL('image/jpeg', quality);
       while (compressedData.length > 95000 && quality > 0.40) {
         quality -= 0.08;
         compressedData = hdCanvas.toDataURL('image/jpeg', quality);
+      }
+      if (!compressedData || compressedData.length < 50) {
+        compressedData = hdCanvas.toDataURL('image/png');
       }
 
       // Display dimensions na tablicy (proporcjonalne i wygodne do manipulacji)
@@ -1443,15 +1438,10 @@ export const App: React.FC = () => {
       pushToHistory([...elementsRef.current.filter((e) => e.id !== imgElement.id), imgElement]);
       setSelectedElementIds([imgElement.id]);
 
-      // 3. Rozgłoś do lobby
-      const broadcastImage = () => {
-        networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
-      };
-      if (networkManagerRef.current && networkManagerRef.current.getConnectedCount() > 1) {
-        setTimeout(broadcastImage, 500);
-      } else {
-        broadcastImage();
-      }
+      // 3. Upewnij się, że połączenie WebRTC jest aktywne i natychmiast rozgłoś do lobby
+      networkManagerRef.current?.ensureConnection(boardSettings.roomCode);
+      networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
+
       showToastRef.current('✅ Zdjęcie HD dodane!');
     } catch (err) {
       console.error('Error handling image upload', err);

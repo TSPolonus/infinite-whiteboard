@@ -28,11 +28,23 @@ export function generateRoomCode(): string {
 const PEER_CONFIG = {
   config: {
     iceServers: [
+      // Google Public STUN (błyskawiczne UDP, wysoka dostępność)
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+      // Cloudflare Public STUN
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      // Twilio Global STUN (AWS Europe / USA)
       { urls: 'stun:global.stun.twilio.com:3478' },
+      // Nextcloud STUN (port 443 HTTPS & port 3478)
+      { urls: 'stun:stun.nextcloud.com:443' },
+      { urls: 'stun:stun.nextcloud.com:3478' },
+      // Syncthing STUN
+      { urls: 'stun:stun.syncthing.net:3478' },
     ],
+    iceCandidatePoolSize: 10,
   },
 };
 
@@ -64,6 +76,7 @@ export class BoardNetworkManager {
   private roomCode: string = '';
   private heartbeatTimer: number | null = null;
   private chunkBuffers: Map<string, { chunks: string[]; received: number; total: number }> = new Map();
+  private pendingQueue: NetworkMessage[] = [];
 
   constructor(
     callbacks: NetworkCallbacks,
@@ -95,48 +108,7 @@ export class BoardNetworkManager {
     this.peer = clientPeer;
 
     clientPeer.on('open', () => {
-      const conn = clientPeer.connect(hostPeerId, {
-        reliable: true,
-      });
-
-      let connectedToHost = false;
-
-      conn.on('open', () => {
-        connectedToHost = true;
-        this.isHost = false;
-        this.connections.set(hostPeerId, conn);
-        this.callbacks.onConnectionStatusChange('connected');
-        this.startHeartbeat();
-
-        this.sendSafe(conn, {
-          type: 'join',
-          userId: this.myUserId,
-          userName: this.myUserName,
-          password: passwordAttempt,
-        });
-      });
-
-      conn.on('data', (data) => {
-        this.handleRawData(data, conn);
-      });
-
-      conn.on('close', () => {
-        this.connections.delete(hostPeerId);
-        this.callbacks.onPeerLeave(hostPeerId);
-      });
-
-      conn.on('error', () => {
-        // Fallback to host
-        if (!connectedToHost) {
-          this.initAsHost(cleanCode);
-        }
-      });
-
-      setTimeout(() => {
-        if (!connectedToHost && this.peer === clientPeer) {
-          this.initAsHost(cleanCode);
-        }
-      }, 7500);
+      this.connectToHost(clientPeer, hostPeerId, cleanCode, passwordAttempt);
     });
 
     clientPeer.on('error', (err) => {
@@ -144,6 +116,60 @@ export class BoardNetworkManager {
         this.initAsHost(cleanCode);
       }
     });
+  }
+
+  private connectToHost(
+    peer: Peer,
+    hostPeerId: string,
+    cleanCode: string,
+    passwordAttempt?: string
+  ) {
+    if (this.isHost || !peer || peer.destroyed) return;
+
+    const existingConn = this.connections.get(hostPeerId);
+    if (existingConn && existingConn.open) return;
+
+    const conn = peer.connect(hostPeerId, {
+      reliable: true,
+    });
+
+    let connectedToHost = false;
+
+    conn.on('open', () => {
+      connectedToHost = true;
+      this.isHost = false;
+      this.connections.set(hostPeerId, conn);
+      this.callbacks.onConnectionStatusChange('connected');
+      this.startHeartbeat();
+
+      this.sendSafe(conn, {
+        type: 'join',
+        userId: this.myUserId,
+        userName: this.myUserName,
+        password: passwordAttempt,
+      });
+
+      this.flushPendingQueue(conn);
+    });
+
+    conn.on('data', (data) => {
+      this.handleRawData(data, conn);
+    });
+
+    conn.on('close', () => {
+      this.connections.delete(hostPeerId);
+      this.callbacks.onPeerLeave(hostPeerId);
+    });
+
+    conn.on('error', (err) => {
+      console.warn('Client connection notice:', err);
+    });
+
+    setTimeout(() => {
+      if (!connectedToHost && this.peer === peer && !peer.destroyed && this.connections.size === 0) {
+        this.initAsHost(cleanCode);
+      }
+    }, 12000);
   }
 
   public initAsHost(cleanCode: string) {
@@ -270,6 +296,7 @@ export class BoardNetworkManager {
         success: true,
         board: { elements, settings },
       });
+      this.flushPendingQueue(conn);
       return;
     }
 
@@ -287,6 +314,7 @@ export class BoardNetworkManager {
         if (msg.board) {
           this.callbacks.onBoardSync(msg.board.elements, msg.board.settings);
         }
+        this.flushPendingQueue(conn);
         break;
       }
 
@@ -406,11 +434,45 @@ export class BoardNetworkManager {
     if (this.peer.disconnected) {
       this.peer.reconnect();
     }
+    // Jeśli klient utracił połączenie z hostem (np. powrót z aparatu/galerii na tablecie)
+    if (!this.isHost && this.peer && !this.peer.destroyed) {
+      const cleanCode = (roomCode || this.roomCode).replace(/[^A-Z0-9]/g, '');
+      const hostPeerId = `inf2-${cleanCode}-host`;
+      const conn = this.connections.get(hostPeerId);
+      if (!conn || !conn.open) {
+        this.connectToHost(this.peer, hostPeerId, cleanCode);
+      }
+    }
   }
 
   public broadcast(msg: NetworkMessage) {
+    let sentCount = 0;
     for (const [, conn] of this.connections) {
-      this.sendSafe(conn, msg);
+      if (conn && conn.open) {
+        this.sendSafe(conn, msg);
+        sentCount++;
+      }
+    }
+
+    // Jeśli połączenie jest chwilowo wznawiane (np. powrót z aparatu/galerii Huawei),
+    // zakolejkuj element, aby wysłać go natychmiast po re-handshake
+    if (
+      sentCount === 0 &&
+      (msg.type === 'element_add' ||
+        msg.type === 'element_update' ||
+        msg.type === 'element_delete' ||
+        msg.type === 'board_sync')
+    ) {
+      this.pendingQueue.push(msg);
+    }
+  }
+
+  private flushPendingQueue(conn: DataConnection) {
+    if (this.pendingQueue.length === 0 || !conn || !conn.open) return;
+    const queued = [...this.pendingQueue];
+    this.pendingQueue = [];
+    for (const m of queued) {
+      this.sendSafe(conn, m);
     }
   }
 

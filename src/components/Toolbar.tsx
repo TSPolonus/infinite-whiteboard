@@ -948,19 +948,38 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             {currentShape === 'double_arrow' && <ArrowLeftRight size={18} />}
           </button>
 
-          <button
+          {/* Wstawianie zdjęcia — rozdzielony label i input z id dla 100% kompatybilności z Huawei, Android i iOS */}
+          <label
+            htmlFor="whiteboard-image-file-input"
             className="glass-btn"
-            onClick={() => fileInputRef.current?.click()}
-            title="Wstaw zdjęcie"
-            style={{ width: 38, height: 38 }}
+            title="Wstaw zdjęcie z galerii lub aparatu"
+            style={{
+              width: 38,
+              height: 38,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
           >
             <ImageIcon size={18} />
-          </button>
+          </label>
           <input
+            id="whiteboard-image-file-input"
             ref={fileInputRef}
             type="file"
-            accept="image/jpeg,image/png,image/webp"
-            style={{ display: 'none' }}
+            accept="image/*"
+            tabIndex={-1}
+            aria-hidden="true"
+            style={{
+              position: 'fixed',
+              top: -9999,
+              left: -9999,
+              width: 1,
+              height: 1,
+              opacity: 0,
+              pointerEvents: 'none',
+            }}
             onChange={handleFileChange}
           />
 
