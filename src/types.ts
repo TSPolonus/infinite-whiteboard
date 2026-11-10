@@ -90,17 +90,24 @@ export interface RemoteCursor {
   lastActive: number;
 }
 
+export interface ToolSettings {
+  pen: { color: string; size: number };
+  highlighter: { color: string; size: number };
+  shape: { color: string; size: number };
+  laser: { color: string; size: number };
+  eraser: { mode: EraserMode; size: number };
+}
+
 export interface BoardSettings {
   id: string;
+  roomCode: string;
   title: string;
   isPasswordProtected: boolean;
   passwordHash?: string;
   backgroundColor: string;
   gridType: 'dots' | 'lines' | 'none';
   gridSize: number;
-  palmRejection: boolean; // Stylus only draws, fingers pan/zoom
-  eraserMode: EraserMode; // 'stroke' vs 'pixel'
-  laserColor: string;
+  palmRejection: boolean;
 }
 
 export type NetworkMessage =

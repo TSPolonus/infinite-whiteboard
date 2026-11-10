@@ -16,6 +16,25 @@ export async function hashPassword(password: string): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+export function generateRoomCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+const PEER_CONFIG = {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+    ],
+  },
+};
+
 export interface NetworkCallbacks {
   onElementAdd: (el: CanvasElement) => void;
   onElementUpdate: (el: CanvasElement) => void;
@@ -38,6 +57,7 @@ export class BoardNetworkManager {
   private myUserName: string = 'Użytkownik';
   private callbacks: NetworkCallbacks;
   private currentBoardProvider: () => { elements: CanvasElement[]; settings: BoardSettings };
+  private roomCode: string = '';
 
   constructor(
     callbacks: NetworkCallbacks,
@@ -45,7 +65,7 @@ export class BoardNetworkManager {
   ) {
     this.callbacks = callbacks;
     this.currentBoardProvider = currentBoardProvider;
-    this.myUserId = 'user_' + Math.random().toString(36).substring(2, 9);
+    this.myUserId = 'user_' + Math.random().toString(36).substring(2, 7);
   }
 
   public getUserId(): string {
@@ -56,19 +76,16 @@ export class BoardNetworkManager {
     return this.isHost;
   }
 
-  public setUserName(name: string) {
-    this.myUserName = name;
-  }
-
-  public connect(boardId: string, passwordAttempt?: string) {
+  public connect(roomCode: string, passwordAttempt?: string) {
+    this.roomCode = roomCode.toUpperCase().trim();
     this.disconnect();
     this.callbacks.onConnectionStatusChange('connecting');
 
-    const hostPeerId = `infboard-${boardId}-host`;
-    const clientPeer = new Peer(`infboard-${boardId}-${this.myUserId}`, {
-      debug: 1,
-    });
+    const cleanCode = this.roomCode.replace(/[^A-Z0-9]/g, '');
+    const hostPeerId = `inf2-${cleanCode}-host`;
+    const clientPeerId = `inf2-${cleanCode}-${this.myUserId}`;
 
+    const clientPeer = new Peer(clientPeerId, PEER_CONFIG);
     this.peer = clientPeer;
 
     clientPeer.on('open', () => {
@@ -76,18 +93,20 @@ export class BoardNetworkManager {
         reliable: true,
       });
 
+      let connectedToHost = false;
+
       conn.on('open', () => {
+        connectedToHost = true;
         this.isHost = false;
         this.connections.set(hostPeerId, conn);
         this.callbacks.onConnectionStatusChange('connected');
 
-        const joinMsg: NetworkMessage = {
+        conn.send({
           type: 'join',
           userId: this.myUserId,
           userName: this.myUserName,
           password: passwordAttempt,
-        };
-        conn.send(joinMsg);
+        } as NetworkMessage);
       });
 
       conn.on('data', (data) => {
@@ -99,27 +118,31 @@ export class BoardNetworkManager {
         this.callbacks.onPeerLeave(hostPeerId);
       });
 
-      conn.on('error', () => {
-        this.initAsHost(boardId);
-      });
+      // If cannot connect to host within 3s, become host
+      setTimeout(() => {
+        if (!connectedToHost && this.peer === clientPeer) {
+          this.initAsHost(cleanCode);
+        }
+      }, 3000);
     });
 
     clientPeer.on('error', (err) => {
+      // If host peer is not available, become the host!
       if (err.type === 'peer-unavailable') {
-        this.initAsHost(boardId);
+        this.initAsHost(cleanCode);
       }
     });
   }
 
-  public initAsHost(boardId: string) {
+  public initAsHost(cleanCode: string) {
     if (this.peer) {
       try {
         this.peer.destroy();
       } catch (e) {}
     }
 
-    const hostPeerId = `infboard-${boardId}-host`;
-    const hostPeer = new Peer(hostPeerId, { debug: 1 });
+    const hostPeerId = `inf2-${cleanCode}-host`;
+    const hostPeer = new Peer(hostPeerId, PEER_CONFIG);
     this.peer = hostPeer;
     this.isHost = true;
 
@@ -179,7 +202,7 @@ export class BoardNetworkManager {
     });
 
     hostPeer.on('error', (err) => {
-      console.warn('Host peer error', err);
+      console.warn('Host peer warning', err);
     });
   }
 
@@ -190,7 +213,7 @@ export class BoardNetworkManager {
           if (msg.error === 'PASSWORD_REQUIRED') {
             this.callbacks.onPasswordRequired();
           } else if (msg.error === 'INVALID_PASSWORD') {
-            this.callbacks.onPasswordError('Błędne hasło do tablicy!');
+            this.callbacks.onPasswordError('Błędne hasło do lobby!');
           }
           return;
         }

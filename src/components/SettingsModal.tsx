@@ -8,9 +8,6 @@ import {
   Smartphone,
   Grid,
   Palette,
-  Sparkles,
-  Scissors,
-  Check,
 } from 'lucide-react';
 import type { BoardSettings, CanvasElement } from '../types';
 
@@ -26,17 +23,10 @@ interface SettingsModalProps {
 }
 
 const BG_PRESETS = [
+  { name: 'Biały (papier)', value: '#ffffff' },
+  { name: 'Jasnoszary', value: '#f8fafc' },
   { name: 'Ciemny grafit', value: '#0f172a' },
   { name: 'Czysty czarny', value: '#000000' },
-  { name: 'Biały', value: '#ffffff' },
-  { name: 'Jasnoszary', value: '#f8fafc' },
-];
-
-const LASER_COLORS = [
-  { name: 'Neon Czerwony', value: '#f43f5e' },
-  { name: 'Neon Błękit', value: '#38bdf8' },
-  { name: 'Neon Zieleń', value: '#22c55e' },
-  { name: 'Neon Fiolet', value: '#c084fc' },
 ];
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -102,7 +92,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           }}
         >
           <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
-            Ustawienia i Rysik
+            Ustawienia Tablicy
           </h3>
           <button
             className="glass-btn"
@@ -123,15 +113,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             marginBottom: 20,
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 18 }}>✍️</span>
+              <span style={{ fontSize: 20 }}>✍️</span>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: '#f8fafc' }}>
                   Ochrona przed dłonią (Palm Rejection)
                 </div>
                 <div style={{ fontSize: 12, color: '#94a3b8' }}>
-                  Tylko rysik rysuje, dotyk palcem/dłonią przesuwa tablicę
+                  Tylko rysik rysuje, dłoń przesuwa i powiększa tablicę
                 </div>
               </div>
             </div>
@@ -169,63 +159,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
-        {/* Tryb gumki: całe linie vs piksele */}
-        <div style={{ marginBottom: 20 }}>
-          <label style={{ fontSize: 13, fontWeight: 600, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-            <Scissors size={16} color="#38bdf8" /> Tryb działania gumki
-          </label>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <button
-              onClick={() => onUpdateSettings({ eraserMode: 'stroke' })}
-              className={`glass-btn ${boardSettings.eraserMode === 'stroke' ? 'active' : ''}`}
-              style={{ padding: '9px 12px', borderRadius: 10, fontSize: 13, gap: 6 }}
-            >
-              <span>Całe linie (Obiektowa)</span>
-              {boardSettings.eraserMode === 'stroke' && <Check size={14} />}
-            </button>
-            <button
-              onClick={() => onUpdateSettings({ eraserMode: 'pixel' })}
-              className={`glass-btn ${boardSettings.eraserMode === 'pixel' ? 'active' : ''}`}
-              style={{ padding: '9px 12px', borderRadius: 10, fontSize: 13, gap: 6 }}
-            >
-              <span>Piksele / Wycinanie</span>
-              {boardSettings.eraserMode === 'pixel' && <Check size={14} />}
-            </button>
-          </div>
-        </div>
-
-        {/* Kolor lasera wskaźnikowego */}
-        <div style={{ marginBottom: 20 }}>
-          <label style={{ fontSize: 13, fontWeight: 600, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-            <Sparkles size={16} color="#f43f5e" /> Kolor wskaźnika laserowego
-          </label>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-            {LASER_COLORS.map((lc) => (
-              <button
-                key={lc.value}
-                onClick={() => onUpdateSettings({ laserColor: lc.value })}
-                style={{
-                  padding: '7px 6px',
-                  borderRadius: 10,
-                  backgroundColor: 'rgba(15, 23, 42, 0.7)',
-                  border: boardSettings.laserColor === lc.value ? `2px solid ${lc.value}` : '1px solid rgba(255,255,255,0.1)',
-                  color: lc.value,
-                  fontSize: 11,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: 4,
-                }}
-              >
-                <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: lc.value }} />
-                <span>{lc.name.split(' ')[1]}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-
         {/* Tło tablicy */}
         <div style={{ marginBottom: 20 }}>
           <label style={{ fontSize: 13, fontWeight: 600, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
@@ -243,7 +176,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   border: boardSettings.backgroundColor === bg.value ? '2px solid #38bdf8' : '1px solid rgba(255,255,255,0.2)',
                   color: bg.value === '#ffffff' || bg.value === '#f8fafc' ? '#0f172a' : '#ffffff',
                   fontSize: 12,
-                  fontWeight: 500,
+                  fontWeight: 600,
                   cursor: 'pointer',
                   textAlign: 'center',
                 }}
@@ -261,9 +194,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </label>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
             {[
+              { id: 'lines', label: 'Kratka (domyślna)' },
               { id: 'dots', label: 'Kropki' },
-              { id: 'lines', label: 'Kratka' },
-              { id: 'none', label: 'Brak' },
+              { id: 'none', label: 'Gładka' },
             ].map((g) => (
               <button
                 key={g.id}
@@ -377,7 +310,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <span>Instalacja jako aplikacja (Android / iOS / HyperOS)</span>
           </div>
           <div>
-            Możesz zainstalować aplikację na ekranie telefonu / tabletu:
+            Możesz dodać aplikację do ekranu głównego:
             <ul style={{ marginLeft: 18, marginTop: 4 }}>
               <li><strong>Android & HyperOS:</strong> Menu przeglądarki (3 kropki) → "Zainstaluj aplikację" lub "Dodaj do ekranu głównego".</li>
               <li><strong>iOS (iPhone/iPad Safari):</strong> Ikona Udostępnij → "Do ekranu początkowego".</li>

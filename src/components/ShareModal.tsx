@@ -8,6 +8,8 @@ import {
   Share2,
   Users,
   KeyRound,
+  LogIn,
+  RotateCcw,
 } from 'lucide-react';
 import type { BoardSettings } from '../types';
 import { hashPassword } from '../utils/webrtc';
@@ -18,6 +20,9 @@ interface ShareModalProps {
   boardSettings: BoardSettings;
   onUpdateSettings: (settings: Partial<BoardSettings>) => void;
   connectedCount: number;
+  connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'host';
+  onJoinRoomByCode: (code: string) => void;
+  onReconnect: () => void;
 }
 
 export const ShareModal: React.FC<ShareModalProps> = ({
@@ -26,9 +31,14 @@ export const ShareModal: React.FC<ShareModalProps> = ({
   boardSettings,
   onUpdateSettings,
   connectedCount,
+  connectionStatus,
+  onJoinRoomByCode,
+  onReconnect,
 }) => {
-  const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
+  const [joinCodeInput, setJoinCodeInput] = useState('');
   const [isProtected, setIsProtected] = useState(boardSettings.isPasswordProtected);
 
   if (!isOpen) return null;
@@ -37,8 +47,14 @@ export const ShareModal: React.FC<ShareModalProps> = ({
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(currentUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  };
+
+  const handleCopyCode = () => {
+    navigator.clipboard.writeText(boardSettings.roomCode);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
   };
 
   const handleSaveProtection = async () => {
@@ -62,6 +78,14 @@ export const ShareModal: React.FC<ShareModalProps> = ({
         isPasswordProtected: false,
         passwordHash: undefined,
       });
+    }
+  };
+
+  const handleJoinByCode = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (joinCodeInput.trim()) {
+      onJoinRoomByCode(joinCodeInput.trim().toUpperCase());
+      setJoinCodeInput('');
     }
   };
 
@@ -92,8 +116,8 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <div
               style={{
-                width: 36,
-                height: 36,
+                width: 38,
+                height: 38,
                 borderRadius: 10,
                 background: 'rgba(56, 189, 248, 0.15)',
                 color: '#38bdf8',
@@ -106,11 +130,50 @@ export const ShareModal: React.FC<ShareModalProps> = ({
             </div>
             <div>
               <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
-                Udostępnij tablicę
+                Lobby i Udostępnianie
               </h3>
-              <p style={{ margin: 0, fontSize: 13, color: '#94a3b8' }}>
-                Współpraca na żywo z dowolnego urządzenia
-              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 2 }}>
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    backgroundColor:
+                      connectionStatus === 'connected' || connectionStatus === 'host'
+                        ? '#22c55e'
+                        : connectionStatus === 'connecting'
+                        ? '#fbbf24'
+                        : '#ef4444',
+                  }}
+                />
+                <span style={{ color: '#94a3b8' }}>
+                  {connectionStatus === 'host'
+                    ? 'Lobby aktywne (jesteś hostem)'
+                    : connectionStatus === 'connected'
+                    ? 'Połączono z lobby'
+                    : connectionStatus === 'connecting'
+                    ? 'Łączenie z siecią...'
+                    : 'Rozłączono'}
+                </span>
+                {connectionStatus === 'disconnected' && (
+                  <button
+                    onClick={onReconnect}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#38bdf8',
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      marginLeft: 6,
+                    }}
+                  >
+                    <RotateCcw size={12} /> Połącz ponownie
+                  </button>
+                )}
+              </div>
             </div>
           </div>
           <button
@@ -122,10 +185,96 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           </button>
         </div>
 
+        {/* Big Room Code Box */}
+        <div
+          style={{
+            background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.12), rgba(129, 140, 248, 0.12))',
+            border: '1px solid rgba(56, 189, 248, 0.3)',
+            borderRadius: 14,
+            padding: '14px 18px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: 16,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 1 }}>
+              Twój Kod Pokoju (Lobby)
+            </div>
+            <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: 4, color: '#38bdf8' }}>
+              {boardSettings.roomCode}
+            </div>
+          </div>
+          <button
+            className="glass-btn"
+            onClick={handleCopyCode}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 10,
+              background: copiedCode ? '#22c55e' : '#0284c7',
+              color: 'white',
+              fontSize: 13,
+              fontWeight: 600,
+              gap: 6,
+            }}
+          >
+            {copiedCode ? <Check size={16} /> : <Copy size={16} />}
+            <span>{copiedCode ? 'Skopiowano!' : 'Kopiuj kod'}</span>
+          </button>
+        </div>
+
+        {/* Join another lobby by code */}
+        <form onSubmit={handleJoinByCode} style={{ marginBottom: 16 }}>
+          <label style={{ fontSize: 12, fontWeight: 500, color: '#cbd5e1', display: 'block', marginBottom: 6 }}>
+            Lub dołącz do innego lobby wpisując kod:
+          </label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              type="text"
+              placeholder="np. A7X92B"
+              maxLength={8}
+              value={joinCodeInput}
+              onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
+              style={{
+                flex: 1,
+                background: '#0f172a',
+                border: '1px solid rgba(255,255,255,0.15)',
+                borderRadius: 10,
+                padding: '8px 12px',
+                color: '#38bdf8',
+                fontSize: 15,
+                fontWeight: 700,
+                letterSpacing: 2,
+                outline: 'none',
+                textTransform: 'uppercase',
+              }}
+            />
+            <button
+              type="submit"
+              className="glass-btn"
+              disabled={!joinCodeInput.trim()}
+              style={{
+                padding: '8px 16px',
+                borderRadius: 10,
+                background: joinCodeInput.trim() ? '#38bdf8' : '#334155',
+                color: joinCodeInput.trim() ? '#0f172a' : '#94a3b8',
+                fontSize: 13,
+                fontWeight: 600,
+                gap: 6,
+                cursor: joinCodeInput.trim() ? 'pointer' : 'default',
+              }}
+            >
+              <LogIn size={15} />
+              <span>Dołącz</span>
+            </button>
+          </div>
+        </form>
+
         {/* Shareable Link Box */}
-        <div style={{ marginBottom: 20 }}>
-          <label style={{ fontSize: 13, fontWeight: 500, color: '#cbd5e1', display: 'block', marginBottom: 8 }}>
-            Link do tablicy (wyślij znajomym lub otwórz na telefonie):
+        <div style={{ marginBottom: 18 }}>
+          <label style={{ fontSize: 12, fontWeight: 500, color: '#cbd5e1', display: 'block', marginBottom: 6 }}>
+            Bezpośredni link do tablicy:
           </label>
           <div
             style={{
@@ -133,8 +282,8 @@ export const ShareModal: React.FC<ShareModalProps> = ({
               alignItems: 'center',
               gap: 8,
               background: '#0f172a',
-              padding: '8px 12px',
-              borderRadius: 12,
+              padding: '7px 10px',
+              borderRadius: 10,
               border: '1px solid rgba(255,255,255,0.1)',
             }}
           >
@@ -145,8 +294,8 @@ export const ShareModal: React.FC<ShareModalProps> = ({
               style={{
                 background: 'transparent',
                 border: 'none',
-                color: '#38bdf8',
-                fontSize: 13,
+                color: '#94a3b8',
+                fontSize: 12,
                 width: '100%',
                 outline: 'none',
               }}
@@ -155,25 +304,18 @@ export const ShareModal: React.FC<ShareModalProps> = ({
               className="glass-btn"
               onClick={handleCopyLink}
               style={{
-                padding: '6px 14px',
+                padding: '5px 12px',
                 borderRadius: 8,
-                background: copied ? '#22c55e' : '#0284c7',
+                background: copiedLink ? '#22c55e' : '#334155',
                 color: '#ffffff',
                 fontWeight: 500,
-                fontSize: 13,
-                gap: 6,
+                fontSize: 12,
+                gap: 5,
                 flexShrink: 0,
               }}
             >
-              {copied ? (
-                <>
-                  <Check size={16} /> Skopiowano!
-                </>
-              ) : (
-                <>
-                  <Copy size={16} /> Kopiuj link
-                </>
-              )}
+              {copiedLink ? <Check size={14} /> : <Copy size={14} />}
+              <span>{copiedLink ? 'Skopiowano!' : 'Kopiuj link'}</span>
             </button>
           </div>
         </div>
@@ -182,40 +324,28 @@ export const ShareModal: React.FC<ShareModalProps> = ({
         <div
           style={{
             background: 'rgba(15, 23, 42, 0.6)',
-            padding: 16,
-            borderRadius: 14,
+            padding: 14,
+            borderRadius: 12,
             border: '1px solid rgba(255,255,255,0.08)',
-            marginBottom: 20,
+            marginBottom: 16,
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {isProtected ? (
-                <Lock size={18} color="#fbbf24" />
-              ) : (
-                <Globe size={18} color="#4ade80" />
-              )}
+              {isProtected ? <Lock size={17} color="#fbbf24" /> : <Globe size={17} color="#4ade80" />}
               <div>
-                <div style={{ fontSize: 14, fontWeight: 600 }}>
-                  Status tablicy: {isProtected ? 'Dostęp za hasłem' : 'Publiczny'}
+                <div style={{ fontSize: 13, fontWeight: 600 }}>
+                  Status lobby: {isProtected ? 'Dostęp za hasłem' : 'Publiczny'}
                 </div>
-                <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>
                   {isProtected
-                    ? 'Tylko osoby z hasłem mogą dołączyć i rysować'
-                    : 'Każdy kto ma link może dołączyć i rysować'}
+                    ? 'Tylko osoby z hasłem mogą rysować na tablicy'
+                    : 'Każdy z kodem lub linkiem może dołączyć'}
                 </div>
               </div>
             </div>
 
-            <label
-              style={{
-                position: 'relative',
-                display: 'inline-block',
-                width: 44,
-                height: 24,
-                cursor: 'pointer',
-              }}
-            >
+            <label style={{ position: 'relative', display: 'inline-block', width: 40, height: 22, cursor: 'pointer' }}>
               <input
                 type="checkbox"
                 checked={isProtected}
@@ -227,16 +357,16 @@ export const ShareModal: React.FC<ShareModalProps> = ({
                   position: 'absolute',
                   inset: 0,
                   backgroundColor: isProtected ? '#38bdf8' : '#334155',
-                  borderRadius: 24,
+                  borderRadius: 22,
                   transition: '0.2s',
                 }}
               >
                 <span
                   style={{
                     position: 'absolute',
-                    height: 18,
-                    width: 18,
-                    left: isProtected ? 22 : 3,
+                    height: 16,
+                    width: 16,
+                    left: isProtected ? 21 : 3,
                     bottom: 3,
                     backgroundColor: 'white',
                     borderRadius: '50%',
@@ -248,26 +378,17 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           </div>
 
           {isProtected && (
-            <div style={{ marginTop: 14 }}>
-              <label
-                style={{
-                  fontSize: 12,
-                  color: '#cbd5e1',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  marginBottom: 6,
-                }}
-              >
-                <KeyRound size={14} /> Hasło do tablicy:
+            <div style={{ marginTop: 10 }}>
+              <label style={{ fontSize: 11, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 5, marginBottom: 5 }}>
+                <KeyRound size={13} /> Hasło do lobby:
               </label>
               <div style={{ display: 'flex', gap: 8 }}>
                 <input
                   type="password"
                   placeholder={
                     boardSettings.passwordHash
-                      ? '•••••••• (Hasło aktywne - wpisz nowe aby zmienić)'
-                      : 'Wpisz nowe hasło...'
+                      ? '•••••••• (Hasło aktywne)'
+                      : 'Wpisz hasło...'
                   }
                   value={passwordInput}
                   onChange={(e) => setPasswordInput(e.target.value)}
@@ -275,10 +396,10 @@ export const ShareModal: React.FC<ShareModalProps> = ({
                     flex: 1,
                     background: '#0f172a',
                     border: '1px solid rgba(255,255,255,0.15)',
-                    borderRadius: 10,
-                    padding: '8px 12px',
+                    borderRadius: 8,
+                    padding: '6px 10px',
                     color: 'white',
-                    fontSize: 14,
+                    fontSize: 13,
                     outline: 'none',
                   }}
                 />
@@ -286,11 +407,11 @@ export const ShareModal: React.FC<ShareModalProps> = ({
                   className="glass-btn"
                   onClick={handleSaveProtection}
                   style={{
-                    padding: '8px 14px',
-                    borderRadius: 10,
+                    padding: '6px 12px',
+                    borderRadius: 8,
                     background: '#0284c7',
                     color: 'white',
-                    fontSize: 13,
+                    fontSize: 12,
                     fontWeight: 500,
                   }}
                 >
@@ -301,7 +422,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           )}
         </div>
 
-        {/* Active Members & Platform Info */}
+        {/* Footer Info */}
         <div
           style={{
             display: 'flex',
@@ -309,16 +430,14 @@ export const ShareModal: React.FC<ShareModalProps> = ({
             justifyContent: 'space-between',
             fontSize: 12,
             color: '#94a3b8',
-            borderTop: '1px solid rgba(255,255,255,0.08)',
-            paddingTop: 14,
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <Users size={15} color="#38bdf8" />
-            <span>Osoby na tablicy: <strong>{connectedCount}</strong></span>
+            <span>Osoby w pokoju: <strong>{connectedCount}</strong></span>
           </div>
 
-          <div>Działa na Android, iOS, HyperOS & PC</div>
+          <div>Tablet, Telefon i Komputer</div>
         </div>
       </div>
     </div>

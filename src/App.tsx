@@ -11,7 +11,7 @@ import type {
   BoardSettings,
   LaserPoint,
   RemoteCursor,
-  EraserMode,
+  ToolSettings,
 } from './types';
 import {
   screenToWorld,
@@ -29,7 +29,7 @@ import {
 } from './utils/canvasRenderer';
 import type { ResizeHandle } from './utils/canvasRenderer';
 import { detectShape } from './utils/shapeDetection';
-import { BoardNetworkManager } from './utils/webrtc';
+import { BoardNetworkManager, generateRoomCode } from './utils/webrtc';
 import { Toolbar } from './components/Toolbar';
 import { ShareModal } from './components/ShareModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -38,24 +38,32 @@ import { PasswordPromptModal } from './components/PasswordPromptModal';
 export const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Board settings & room
+  // Initialize room code (from hash or generate 6-char code)
   const [boardSettings, setBoardSettings] = useState<BoardSettings>(() => {
-    const hash = window.location.hash.replace('#room=', '');
-    const roomId = hash || 'room-' + Math.random().toString(36).substring(2, 8);
+    const hash = window.location.hash.replace('#room=', '').toUpperCase();
+    const code = hash && hash.length >= 3 ? hash : generateRoomCode();
     if (!hash) {
-      window.location.hash = `room=${roomId}`;
+      window.location.hash = `room=${code}`;
     }
     return {
-      id: roomId,
+      id: code,
+      roomCode: code,
       title: 'Moja Tablica',
       isPasswordProtected: false,
-      backgroundColor: '#0f172a',
-      gridType: 'dots',
-      gridSize: 40,
-      palmRejection: true, // Default to true for tablets
-      eraserMode: 'stroke',
-      laserColor: '#f43f5e',
+      backgroundColor: '#ffffff', // Podstawowy tryb: biały
+      gridType: 'lines',           // Podstawowy tryb: w kratkę
+      gridSize: 32,
+      palmRejection: true,
     };
+  });
+
+  // Individual tool settings (per-tool state)
+  const [toolSettings, setToolSettings] = useState<ToolSettings>({
+    pen: { color: '#0f172a', size: 3 },
+    highlighter: { color: '#facc15', size: 24 },
+    shape: { color: '#2563eb', size: 3 },
+    laser: { color: '#f43f5e', size: 10 },
+    eraser: { mode: 'stroke', size: 24 },
   });
 
   // Canvas elements state
@@ -70,11 +78,9 @@ export const App: React.FC = () => {
     scale: 1,
   });
 
-  // Tool settings
+  // Active tools
   const [currentTool, setCurrentTool] = useState<Tool>('pen');
   const [currentShape, setCurrentShape] = useState<ShapeType>('rectangle');
-  const [color, setColor] = useState<string>('#38bdf8');
-  const [strokeWidth, setStrokeWidth] = useState<number>(4);
   const [autoShapeEnabled, setAutoShapeEnabled] = useState<boolean>(true);
 
   // Active interaction states
@@ -87,22 +93,25 @@ export const App: React.FC = () => {
   const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandle | null>(null);
   const [initialBBox, setInitialBBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
 
+  // Tablet Auto-shape hold detection with jitter deadband
+  const holdTimerRef = useRef<number | null>(null);
+  const lastAnchorRef = useRef<Point | null>(null);
+
   // Multi-touch gestures
   const activePointers = useRef<Map<number, Point>>(new Map());
   const initialPinchDist = useRef<number | null>(null);
   const initialScale = useRef<number>(1);
   const isSpacePressed = useRef<boolean>(false);
+  const isRightClickPanning = useRef<boolean>(false);
 
-  // Auto-shape hold detection timer
-  const holdTimerRef = useRef<number | null>(null);
-
-  // Laser pointer trails
+  // Laser trails
   const laserTrailsRef = useRef<LaserPoint[]>([]);
   const lastLaserBroadcastRef = useRef<number>(0);
 
-  // Remote collaboration
+  // Remote collaboration & Lobby
   const [remoteCursors, setRemoteCursors] = useState<Map<string, RemoteCursor>>(new Map());
   const [connectedCount, setConnectedCount] = useState<number>(1);
+  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'host'>('disconnected');
   const networkManagerRef = useRef<BoardNetworkManager | null>(null);
 
   // Modals
@@ -114,7 +123,7 @@ export const App: React.FC = () => {
   // Image cache
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
 
-  // Push history helper
+  // History push helper
   const pushToHistory = useCallback((newElements: CanvasElement[]) => {
     setHistory((prev) => [...prev.slice(-30), elements]);
     setRedoStack([]);
@@ -150,8 +159,12 @@ export const App: React.FC = () => {
     });
   }, [redoStack, elements, boardSettings]);
 
-  // Setup PeerJS Networking
-  useEffect(() => {
+  // Setup Lobby Networking
+  const initNetworking = useCallback((code: string, password?: string) => {
+    if (networkManagerRef.current) {
+      networkManagerRef.current.disconnect();
+    }
+
     const netManager = new BoardNetworkManager(
       {
         onElementAdd: (el) => {
@@ -199,7 +212,8 @@ export const App: React.FC = () => {
           setIsPasswordModalOpen(true);
           setPasswordErrorMessage(msg);
         },
-        onConnectionStatusChange: () => {
+        onConnectionStatusChange: (status) => {
+          setConnectionStatus(status);
           setConnectedCount(netManager.getConnectedCount());
         },
       },
@@ -210,12 +224,24 @@ export const App: React.FC = () => {
     );
 
     networkManagerRef.current = netManager;
-    netManager.connect(boardSettings.id);
+    netManager.connect(code, password);
+  }, [elements, boardSettings]);
 
+  useEffect(() => {
+    initNetworking(boardSettings.roomCode);
     return () => {
-      netManager.disconnect();
+      networkManagerRef.current?.disconnect();
     };
-  }, [boardSettings.id]);
+  }, [boardSettings.roomCode]);
+
+  // Join Room by Code
+  const handleJoinRoomByCode = (newCode: string) => {
+    const clean = newCode.toUpperCase().trim();
+    window.location.hash = `room=${clean}`;
+    setBoardSettings((prev) => ({ ...prev, id: clean, roomCode: clean }));
+    initNetworking(clean);
+    setIsShareModalOpen(false);
+  };
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -250,7 +276,7 @@ export const App: React.FC = () => {
     };
   }, [handleUndo, handleRedo, selectedElementId]);
 
-  // Image Paste Listener (Ctrl+V)
+  // Image Paste (Ctrl+V)
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
       if (e.clipboardData && e.clipboardData.items) {
@@ -267,7 +293,7 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('paste', handlePaste);
   }, [transform]);
 
-  // Resize canvas with devicePixelRatio for ultra-sharp stylus tracking
+  // Resize canvas with DPR
   useEffect(() => {
     const resize = () => {
       const canvas = canvasRef.current;
@@ -283,7 +309,7 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('resize', resize);
   }, []);
 
-  // Accurate Stylus & Touch Coordinate Calculation
+  // Stylus & Touch Coordinate Calculation
   const getCanvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return { screenPos: { x: e.clientX, y: e.clientY }, worldPos: screenToWorld(e.clientX, e.clientY, transform) };
@@ -330,7 +356,7 @@ export const App: React.FC = () => {
       ctx.translate(transform.x, transform.y);
       ctx.scale(transform.scale, transform.scale);
 
-      // 1. Elements
+      // 1. Existing Elements
       for (const el of elements) {
         if (el.type === 'stroke') {
           drawStroke(ctx, el);
@@ -356,20 +382,22 @@ export const App: React.FC = () => {
             y: Math.min(p0.y, pn.y),
             width: Math.abs(pn.x - p0.x),
             height: Math.abs(pn.y - p0.y),
-            color: color,
-            strokeWidth: strokeWidth,
+            color: toolSettings.shape.color,
+            strokeWidth: toolSettings.shape.size,
             points: currentShape === 'line' || currentShape === 'arrow' || currentShape === 'double_arrow' ? [p0, pn] : undefined,
             timestamp: now,
           };
           drawShape(ctx, tempShape);
         } else if (currentTool === 'pen' || currentTool === 'highlighter') {
+          const activeColor = currentTool === 'pen' ? toolSettings.pen.color : toolSettings.highlighter.color;
+          const activeSize = currentTool === 'pen' ? toolSettings.pen.size : toolSettings.highlighter.size;
           const tempStroke: StrokeElement = {
             id: 'temp',
             type: 'stroke',
             tool: currentTool,
             points: currentStroke,
-            color: color,
-            size: strokeWidth,
+            color: activeColor,
+            size: activeSize,
             opacity: currentTool === 'highlighter' ? 0.45 : 1,
             timestamp: now,
           };
@@ -408,13 +436,12 @@ export const App: React.FC = () => {
     elements,
     transform,
     boardSettings,
+    toolSettings,
     isDrawing,
     currentStroke,
     snappedShape,
     currentTool,
     currentShape,
-    color,
-    strokeWidth,
     selectedElementId,
     remoteCursors,
   ]);
@@ -426,7 +453,14 @@ export const App: React.FC = () => {
     const { screenPos, worldPos } = getCanvasPoint(e);
     activePointers.current.set(e.pointerId, screenPos);
 
-    // 1. Multi-touch gesture (Pinch-to-zoom / Two-finger pan)
+    // 1. Right Click Panning on PC
+    if (e.button === 2) {
+      isRightClickPanning.current = true;
+      setDragStart(screenPos);
+      return;
+    }
+
+    // 2. Multi-touch gesture (Pinch-to-zoom / Two-finger pan)
     if (activePointers.current.size === 2) {
       const pts = Array.from(activePointers.current.values());
       initialPinchDist.current = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
@@ -439,20 +473,19 @@ export const App: React.FC = () => {
 
     if (activePointers.current.size > 2) return;
 
-    // 2. PALM REJECTION MODE:
-    // If enabled, fingers / palm ONLY pan the canvas, while stylus draws!
+    // 3. PALM REJECTION MODE:
     if (boardSettings.palmRejection && e.pointerType === 'touch') {
       setDragStart(screenPos);
       return;
     }
 
-    // 3. Manual Pan (Hand tool, spacebar, or middle click)
+    // 4. Hand tool or Spacebar pan
     if (isSpacePressed.current || currentTool === 'hand' || e.button === 1) {
       setDragStart(screenPos);
       return;
     }
 
-    // 4. Select Tool: Check resize handles first, then element hit
+    // 5. Select Tool: Check resize handles first, then element hit
     if (currentTool === 'select') {
       if (selectedElementId) {
         const selected = elements.find((el) => el.id === selectedElementId);
@@ -475,7 +508,6 @@ export const App: React.FC = () => {
         }
       }
 
-      // Hit test elements
       const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
       if (hit) {
         setSelectedElementId(hit.id);
@@ -488,9 +520,9 @@ export const App: React.FC = () => {
       return;
     }
 
-    // 5. Eraser Tool: object vs pixel erase
+    // 6. Eraser Tool: object vs pixel erase
     if (currentTool === 'eraser') {
-      if (boardSettings.eraserMode === 'stroke') {
+      if (toolSettings.eraser.mode === 'stroke') {
         const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
         if (hit) {
           const next = elements.filter((el) => el.id !== hit.id);
@@ -498,33 +530,33 @@ export const App: React.FC = () => {
           networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
         }
       } else {
-        // Pixel eraser start
         applyPixelEraser(worldPos);
       }
       return;
     }
 
-    // 6. Laser Pointer Tool
+    // 7. Laser Pointer Tool
     if (currentTool === 'laser') {
       setIsDrawing(true);
       const lp: LaserPoint = {
         x: worldPos.x,
         y: worldPos.y,
         timestamp: Date.now(),
-        color: boardSettings.laserColor,
-        size: 10,
+        color: toolSettings.laser.color,
+        size: toolSettings.laser.size,
       };
       laserTrailsRef.current.push(lp);
       networkManagerRef.current?.broadcast({ type: 'laser_stroke', points: [lp] });
       return;
     }
 
-    // 7. Drawing Tools (Pen, Highlighter, Shape)
+    // 8. Drawing Tools (Pen, Highlighter, Shape)
     setIsDrawing(true);
     setCurrentStroke([worldPos]);
     setSnappedShape(null);
+    lastAnchorRef.current = worldPos;
 
-    // Auto-shape hold timer
+    // Start auto-shape hold timer
     if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
       holdTimerRef.current = window.setTimeout(() => {
@@ -543,14 +575,14 @@ export const App: React.FC = () => {
 
     // Broadcast cursor position
     const now = Date.now();
-    if (now - lastLaserBroadcastRef.current > 50) {
+    if (now - lastLaserBroadcastRef.current > 60) {
       lastLaserBroadcastRef.current = now;
       networkManagerRef.current?.broadcast({
         type: 'cursor_move',
         cursor: {
           userId: networkManagerRef.current?.getUserId() || 'me',
           userName: 'Użytkownik',
-          color: color,
+          color: toolSettings.pen.color,
           x: worldPos.x,
           y: worldPos.y,
           lastActive: now,
@@ -558,12 +590,21 @@ export const App: React.FC = () => {
       });
     }
 
+    // Right Mouse Button Panning
+    if (isRightClickPanning.current && dragStart) {
+      const dx = screenPos.x - dragStart.x;
+      const dy = screenPos.y - dragStart.y;
+      setTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+      setDragStart(screenPos);
+      return;
+    }
+
     // Multi-touch pinch & pan
     if (activePointers.current.size === 2 && initialPinchDist.current !== null) {
       const pts = Array.from(activePointers.current.values());
       const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       const factor = currentDist / initialPinchDist.current;
-      const newScale = Math.min(5, Math.max(0.15, initialScale.current * factor));
+      const newScale = Math.min(6, Math.max(0.12, initialScale.current * factor));
 
       const centerScreen = {
         x: (pts[0].x + pts[1].x) / 2,
@@ -663,7 +704,7 @@ export const App: React.FC = () => {
 
     // Eraser on drag
     if (currentTool === 'eraser' && (e.buttons === 1 || e.pointerType === 'pen')) {
-      if (boardSettings.eraserMode === 'stroke') {
+      if (toolSettings.eraser.mode === 'stroke') {
         const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
         if (hit) {
           const next = elements.filter((el) => el.id !== hit.id);
@@ -682,8 +723,8 @@ export const App: React.FC = () => {
         x: worldPos.x,
         y: worldPos.y,
         timestamp: Date.now(),
-        color: boardSettings.laserColor,
-        size: 10,
+        color: toolSettings.laser.color,
+        size: toolSettings.laser.size,
       };
       laserTrailsRef.current.push(lp);
       networkManagerRef.current?.broadcast({ type: 'laser_stroke', points: [lp] });
@@ -694,18 +735,29 @@ export const App: React.FC = () => {
     if (isDrawing) {
       setCurrentStroke((prev) => [...prev, worldPos]);
 
+      // Tablet-safe auto-shape hold detection:
+      // Only reset timer if movement is SIGNIFICANT (> 14px).
+      // If stylus is holding still or has micro-tremor, DO NOT reset the timer!
       if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
-        if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
-        holdTimerRef.current = window.setTimeout(() => {
-          triggerAutoShapeSnap();
-        }, 420);
+        if (lastAnchorRef.current) {
+          const distFromAnchor = Math.hypot(worldPos.x - lastAnchorRef.current.x, worldPos.y - lastAnchorRef.current.y);
+          if (distFromAnchor > 14) {
+            lastAnchorRef.current = worldPos;
+            if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
+            holdTimerRef.current = window.setTimeout(() => {
+              triggerAutoShapeSnap();
+            }, 420);
+          }
+        } else {
+          lastAnchorRef.current = worldPos;
+        }
       }
     }
   };
 
   // Pixel Eraser logic
   const applyPixelEraser = (erasePoint: Point) => {
-    const eraserRadius = Math.max(16, strokeWidth * 2.5);
+    const eraserRadius = toolSettings.eraser.size;
     let changed = false;
     let nextElements: CanvasElement[] = [];
 
@@ -735,9 +787,11 @@ export const App: React.FC = () => {
   // Auto Shape Detection
   const triggerAutoShapeSnap = () => {
     setCurrentStroke((latestPoints) => {
-      if (latestPoints.length < 6) return latestPoints;
+      if (latestPoints.length < 5) return latestPoints;
       const detected = detectShape(latestPoints);
       if (detected) {
+        const activeColor = currentTool === 'pen' ? toolSettings.pen.color : toolSettings.highlighter.color;
+        const activeSize = currentTool === 'pen' ? toolSettings.pen.size : toolSettings.highlighter.size;
         const shapeEl: ShapeElement = {
           id: 'shape_' + Math.random().toString(36).substring(2, 9),
           type: 'shape',
@@ -747,11 +801,14 @@ export const App: React.FC = () => {
           width: detected.width,
           height: detected.height,
           points: detected.points,
-          color: color,
-          strokeWidth: strokeWidth,
+          color: activeColor,
+          strokeWidth: activeSize,
           timestamp: Date.now(),
         };
         setSnappedShape(shapeEl);
+        if (typeof navigator !== 'undefined' && navigator.vibrate) {
+          navigator.vibrate(35);
+        }
       }
       return latestPoints;
     });
@@ -767,6 +824,13 @@ export const App: React.FC = () => {
     if (holdTimerRef.current) {
       clearTimeout(holdTimerRef.current);
       holdTimerRef.current = null;
+    }
+    lastAnchorRef.current = null;
+
+    if (isRightClickPanning.current) {
+      isRightClickPanning.current = false;
+      setDragStart(null);
+      return;
     }
 
     setDragStart(null);
@@ -797,8 +861,8 @@ export const App: React.FC = () => {
         width: Math.abs(pn.x - p0.x),
         height: Math.abs(pn.y - p0.y),
         points: currentShape === 'line' || currentShape === 'arrow' || currentShape === 'double_arrow' ? [p0, pn] : undefined,
-        color: color,
-        strokeWidth: strokeWidth,
+        color: toolSettings.shape.color,
+        strokeWidth: toolSettings.shape.size,
         timestamp: Date.now(),
       };
       pushToHistory([...elements, newShape]);
@@ -808,13 +872,15 @@ export const App: React.FC = () => {
     }
 
     if ((currentTool === 'pen' || currentTool === 'highlighter') && currentStroke.length > 0) {
+      const activeColor = currentTool === 'pen' ? toolSettings.pen.color : toolSettings.highlighter.color;
+      const activeSize = currentTool === 'pen' ? toolSettings.pen.size : toolSettings.highlighter.size;
       const newStroke: StrokeElement = {
         id: 'stroke_' + Math.random().toString(36).substring(2, 9),
         type: 'stroke',
         tool: currentTool,
         points: currentStroke,
-        color: color,
-        size: strokeWidth,
+        color: activeColor,
+        size: activeSize,
         opacity: currentTool === 'highlighter' ? 0.45 : 1,
         timestamp: Date.now(),
       };
@@ -824,33 +890,26 @@ export const App: React.FC = () => {
     }
   };
 
+  // PC Wheel Zoom (Directly zoom via scroll towards mouse cursor!)
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
-    if (e.ctrlKey || e.metaKey) {
-      const zoomFactor = e.deltaY < 0 ? 1.12 : 0.89;
-      const newScale = Math.min(5, Math.max(0.12, transform.scale * zoomFactor));
+    const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
+    const newScale = Math.min(6, Math.max(0.12, transform.scale * zoomFactor));
 
-      const mouseX = e.clientX;
-      const mouseY = e.clientY;
+    const mouseX = e.clientX;
+    const mouseY = e.clientY;
 
-      setTransform((prev) => ({
-        scale: newScale,
-        x: mouseX - (mouseX - prev.x) * (newScale / prev.scale),
-        y: mouseY - (mouseY - prev.y) * (newScale / prev.scale),
-      }));
-    } else {
-      setTransform((prev) => ({
-        ...prev,
-        x: prev.x - e.deltaX,
-        y: prev.y - e.deltaY,
-      }));
-    }
+    setTransform((prev) => ({
+      scale: newScale,
+      x: mouseX - (mouseX - prev.x) * (newScale / prev.scale),
+      y: mouseY - (mouseY - prev.y) * (newScale / prev.scale),
+    }));
   };
 
   // Zoom control buttons
   const handleZoomIn = () => {
     setTransform((prev) => {
-      const newScale = Math.min(5, prev.scale * 1.25);
+      const newScale = Math.min(6, prev.scale * 1.25);
       const cx = window.innerWidth / 2;
       const cy = window.innerHeight / 2;
       return {
@@ -863,7 +922,7 @@ export const App: React.FC = () => {
 
   const handleZoomOut = () => {
     setTransform((prev) => {
-      const newScale = Math.max(0.15, prev.scale * 0.8);
+      const newScale = Math.max(0.12, prev.scale * 0.8);
       const cx = window.innerWidth / 2;
       const cy = window.innerHeight / 2;
       return {
@@ -1074,13 +1133,27 @@ export const App: React.FC = () => {
   };
 
   const handlePasswordSubmit = (password: string) => {
-    networkManagerRef.current?.connect(boardSettings.id, password);
+    networkManagerRef.current?.connect(boardSettings.roomCode, password);
+  };
+
+  const updateToolSetting = <T extends keyof ToolSettings>(tool: T, settings: Partial<ToolSettings[T]>) => {
+    setToolSettings((prev) => ({
+      ...prev,
+      [tool]: {
+        ...prev[tool],
+        ...settings,
+      },
+    }));
   };
 
   return (
-    <div style={{ position: 'relative', width: '100vw', height: '100vh', overflow: 'hidden' }}>
+    <div
+      onContextMenu={(e) => e.preventDefault()}
+      style={{ position: 'relative', width: '100vw', height: '100vh', overflow: 'hidden' }}
+    >
       <canvas
         ref={canvasRef}
+        onContextMenu={(e) => e.preventDefault()}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -1091,10 +1164,10 @@ export const App: React.FC = () => {
           height: '100%',
           display: 'block',
           cursor:
-            activeResizeHandle
-              ? 'crosshair'
-              : currentTool === 'hand' || isSpacePressed.current
+            isRightClickPanning.current || currentTool === 'hand' || isSpacePressed.current
               ? 'grab'
+              : activeResizeHandle
+              ? 'crosshair'
               : currentTool === 'laser'
               ? 'crosshair'
               : currentTool === 'eraser'
@@ -1107,8 +1180,7 @@ export const App: React.FC = () => {
       <Toolbar
         currentTool={currentTool}
         currentShape={currentShape}
-        color={color}
-        strokeWidth={strokeWidth}
+        toolSettings={toolSettings}
         autoShapeEnabled={autoShapeEnabled}
         scale={transform.scale}
         canUndo={history.length > 0}
@@ -1118,14 +1190,10 @@ export const App: React.FC = () => {
         selectedElementId={selectedElementId}
         onToolChange={setCurrentTool}
         onShapeChange={setCurrentShape}
-        onColorChange={setColor}
-        onStrokeWidthChange={setStrokeWidth}
+        onUpdateToolSetting={updateToolSetting}
         onToggleAutoShape={() => setAutoShapeEnabled((prev) => !prev)}
         onTogglePalmRejection={() =>
           setBoardSettings((prev) => ({ ...prev, palmRejection: !prev.palmRejection }))
-        }
-        onEraserModeChange={(mode: EraserMode) =>
-          setBoardSettings((prev) => ({ ...prev, eraserMode: mode }))
         }
         onUndo={handleUndo}
         onRedo={handleRedo}
@@ -1155,6 +1223,9 @@ export const App: React.FC = () => {
           });
         }}
         connectedCount={connectedCount}
+        connectionStatus={connectionStatus}
+        onJoinRoomByCode={handleJoinRoomByCode}
+        onReconnect={() => initNetworking(boardSettings.roomCode)}
       />
 
       <SettingsModal
