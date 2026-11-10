@@ -11,6 +11,7 @@ import {
   RotateCcw,
   LogOut,
   PlusCircle,
+  RefreshCw,
 } from 'lucide-react';
 import type { BoardSettings } from '../types';
 import { hashPassword } from '../utils/webrtc';
@@ -26,6 +27,7 @@ interface ShareModalProps {
   onReconnect: () => void;
   onLeaveLobby: () => void;
   onCreateNewLobby: () => void;
+  onHostForceRefresh?: () => void;
 }
 
 export const ShareModal: React.FC<ShareModalProps> = ({
@@ -39,6 +41,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
   onReconnect,
   onLeaveLobby,
   onCreateNewLobby,
+  onHostForceRefresh,
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
@@ -228,6 +231,49 @@ export const ShareModal: React.FC<ShareModalProps> = ({
             <span>{copiedCode ? 'Skopiowano!' : 'Kopiuj kod'}</span>
           </button>
         </div>
+
+        {/* Host Controls: Force Refresh Images for all users */}
+        {connectionStatus === 'host' && onHostForceRefresh && (
+          <div
+            style={{
+              background: 'rgba(234, 179, 8, 0.08)',
+              border: '1px solid rgba(250, 204, 21, 0.28)',
+              borderRadius: 12,
+              padding: '12px 14px',
+              marginBottom: 16,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#facc15', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <RefreshCw size={14} /> Odświeżenie obrazów (Host)
+              </div>
+              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2, lineHeight: 1.35 }}>
+                W razie błędu wyświetlania zdjęcia u innego użytkownika, kliknij ten przycisk, aby wymusić ponowne załadowanie u wszystkich.
+              </div>
+            </div>
+            <button
+              className="glass-btn"
+              onClick={onHostForceRefresh}
+              style={{
+                padding: '8px 12px',
+                background: 'rgba(234, 179, 8, 0.2)',
+                color: '#facc15',
+                border: '1px solid rgba(250, 204, 21, 0.45)',
+                borderRadius: 9,
+                fontSize: 11,
+                fontWeight: 700,
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+              }}
+            >
+              Odśwież u wszystkich
+            </button>
+          </div>
+        )}
 
         {/* Leave Lobby / Create New Lobby Buttons */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>

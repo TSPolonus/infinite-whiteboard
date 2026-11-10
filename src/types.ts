@@ -98,6 +98,7 @@ export interface RemoteCursor {
   x: number;
   y: number;
   lastActive: number;
+  isDrawing?: boolean;
 }
 
 export interface ToolSettings {
@@ -132,4 +133,5 @@ export type NetworkMessage =
   | { type: 'board_sync'; elements: CanvasElement[]; settings: BoardSettings }
   | { type: 'laser_stroke'; points: LaserPoint[] }
   | { type: 'cursor_move'; cursor: RemoteCursor }
+  | { type: 'force_refresh_images' }
   | { type: 'board_settings_update'; settings: Partial<BoardSettings> };

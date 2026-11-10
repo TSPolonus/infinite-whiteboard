@@ -29,6 +29,7 @@ import {
   getHandleAtPoint,
   getShapeVertices,
   eraseStrokePixels,
+  clearPixelCache,
 } from './utils/canvasRenderer';
 import type { ResizeHandle } from './utils/canvasRenderer';
 import { detectShape } from './utils/shapeDetection';
@@ -37,6 +38,7 @@ import { Toolbar } from './components/Toolbar';
 import { ShareModal } from './components/ShareModal';
 import { SettingsModal } from './components/SettingsModal';
 import { PasswordPromptModal } from './components/PasswordPromptModal';
+import { OffscreenIndicators } from './components/OffscreenIndicators';
 
 export const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -262,6 +264,29 @@ export const App: React.FC = () => {
             elementsRef.current = next;
             return next;
           });
+          if (el.userId && el.userId !== netManager.getUserId()) {
+            let px = (el as any).x || 0;
+            let py = (el as any).y || 0;
+            if (el.type === 'stroke' && el.points.length > 0) {
+              const lastPt = el.points[el.points.length - 1];
+              px = lastPt.x;
+              py = lastPt.y;
+            }
+            setRemoteCursors((prev) => {
+              const next = new Map(prev);
+              const existing = next.get(el.userId!);
+              next.set(el.userId!, {
+                userId: el.userId!,
+                userName: existing?.userName || 'Uczestnik',
+                color: (el as any).color || existing?.color || '#38bdf8',
+                x: px,
+                y: py,
+                lastActive: Date.now(),
+                isDrawing: true,
+              });
+              return next;
+            });
+          }
         },
         onElementUpdate: (el) => {
           setElements((prev) => {
@@ -278,6 +303,10 @@ export const App: React.FC = () => {
           });
         },
         onBoardSync: (syncElements, syncSettings) => {
+          // Wyczyść cache obrazów aby wymusić świeże dekodowanie
+          imageCacheRef.current.clear();
+          clearPixelCache();
+
           // Ochrona przed skasowaniem lokalnie wgranego zdjęcia przy reconnect z galerii tableta:
           const localRecent = elementsRef.current.filter(
             (el) => !syncElements.some((s) => s.id === el.id) && (Date.now() - el.timestamp < 30000 || el.type === 'image')
@@ -292,6 +321,11 @@ export const App: React.FC = () => {
           for (const missing of localRecent) {
             netManager.broadcast({ type: 'element_add', element: missing });
           }
+        },
+        onForceRefreshImages: () => {
+          imageCacheRef.current.clear();
+          clearPixelCache();
+          showToastRef.current('🔄 Host odświeżył obrazki na tablicy.');
         },
         onLaserStroke: (points) => {
           laserTrailsRef.current.push(...points);
@@ -425,6 +459,8 @@ export const App: React.FC = () => {
         if (selectedElementIds.length > 0 && !(e.target instanceof HTMLInputElement)) {
           handleDeleteSelected();
         }
+      } else if (e.key === 'Home') {
+        handleRecenterBoard();
       }
     };
 
@@ -780,6 +816,19 @@ export const App: React.FC = () => {
     setSnappedShape(null);
     lastAnchorRef.current = worldPos;
 
+    networkManagerRef.current?.broadcast({
+      type: 'cursor_move',
+      cursor: {
+        userId: networkManagerRef.current?.getUserId() || 'me',
+        userName: 'Użytkownik',
+        color: toolSettings.pen.color,
+        x: Math.round(worldPos.x),
+        y: Math.round(worldPos.y),
+        lastActive: Date.now(),
+        isDrawing: true,
+      },
+    });
+
     if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
       holdTimerRef.current = window.setTimeout(() => {
@@ -796,9 +845,10 @@ export const App: React.FC = () => {
       activePointers.current.set(e.pointerId, screenPos);
     }
 
-    // Broadcast cursor position (optymalizacja częstotliwości do max 8/sek, aby nie blokować pasma dla rysowania)
+    // Broadcast cursor position (optymalizacja: częściej przy rysowaniu, aby wskaźniki były ultra-płynne)
     const now = Date.now();
-    if (now - lastLaserBroadcastRef.current > 120) {
+    const cursorThrottle = isDrawing ? 75 : 120;
+    if (now - lastLaserBroadcastRef.current > cursorThrottle) {
       lastLaserBroadcastRef.current = now;
       networkManagerRef.current?.broadcast({
         type: 'cursor_move',
@@ -809,6 +859,7 @@ export const App: React.FC = () => {
           x: Math.round(worldPos.x),
           y: Math.round(worldPos.y),
           lastActive: now,
+          isDrawing: isDrawing,
         },
       });
     }
@@ -1219,6 +1270,20 @@ export const App: React.FC = () => {
     if (!isDrawing) return;
     setIsDrawing(false);
 
+    const { worldPos } = getCanvasPoint(e);
+    networkManagerRef.current?.broadcast({
+      type: 'cursor_move',
+      cursor: {
+        userId: networkManagerRef.current?.getUserId() || 'me',
+        userName: 'Użytkownik',
+        color: toolSettings.pen.color,
+        x: Math.round(worldPos.x),
+        y: Math.round(worldPos.y),
+        lastActive: Date.now(),
+        isDrawing: false,
+      },
+    });
+
     if (currentTool === 'eraser') {
       setCurrentStroke([]);
       pushToHistory(elements);
@@ -1350,6 +1415,45 @@ export const App: React.FC = () => {
       y: window.innerHeight / 2,
       scale: 1,
     });
+  };
+
+  // Powrót na środek tablicy (wyśrodkowanie na elementach lub środku 0,0)
+  const handleRecenterBoard = () => {
+    if (elements.length > 0) {
+      const bbox = getCombinedBBox(elements);
+      if (bbox) {
+        const targetWorldX = (bbox.minX + bbox.maxX) / 2;
+        const targetWorldY = (bbox.minY + bbox.maxY) / 2;
+        setTransform((prev) => ({
+          ...prev,
+          x: window.innerWidth / 2 - targetWorldX * prev.scale,
+          y: window.innerHeight / 2 - targetWorldY * prev.scale,
+        }));
+        showToastRef.current('🎯 Wyśrodkowano widok na elementach tablicy');
+        return;
+      }
+    }
+    setTransform({
+      x: window.innerWidth / 2,
+      y: window.innerHeight / 2,
+      scale: 1,
+    });
+    showToastRef.current('🎯 Powrót na środek tablicy (0, 0)');
+  };
+
+  // Opcja dla Hosta: Wymuszenie odświeżenia i ponownego załadowania obrazów u wszystkich
+  const handleHostForceRefresh = () => {
+    imageCacheRef.current.clear();
+    clearPixelCache();
+    if (networkManagerRef.current) {
+      networkManagerRef.current.broadcast({ type: 'force_refresh_images' });
+      networkManagerRef.current.broadcast({
+        type: 'board_sync',
+        elements: elementsRef.current,
+        settings: boardSettings,
+      });
+    }
+    showToastRef.current('🔄 Wymuszono odświeżenie obrazków u wszystkich uczestników!');
   };
 
   // Transformation actions on all selected elements
@@ -1745,6 +1849,9 @@ export const App: React.FC = () => {
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}
         onResetZoom={handleResetZoom}
+        onRecenterBoard={handleRecenterBoard}
+        isHost={connectionStatus === 'host'}
+        onHostForceRefresh={handleHostForceRefresh}
         onImageUpload={handleImageUpload}
         onClearCanvas={handleClearCanvas}
         onOpenShareModal={() => setIsShareModalOpen(true)}
@@ -1755,6 +1862,20 @@ export const App: React.FC = () => {
         onBringToFront={handleBringToFront}
         onSendToBack={handleSendToBack}
         onUpdateCircleRadius={handleSetCircleRadius}
+      />
+
+      <OffscreenIndicators
+        remoteCursors={remoteCursors}
+        transform={transform}
+        myUserId={networkManagerRef.current?.getUserId() || 'me'}
+        onNavigateTo={(wx, wy, name) => {
+          setTransform((prev) => ({
+            ...prev,
+            x: window.innerWidth / 2 - wx * prev.scale,
+            y: window.innerHeight / 2 - wy * prev.scale,
+          }));
+          showToastRef.current(`📍 Przeniesiono do: ${name}`);
+        }}
       />
 
       <ShareModal
@@ -1774,6 +1895,7 @@ export const App: React.FC = () => {
         onReconnect={() => initNetworking(boardSettings.roomCode)}
         onLeaveLobby={handleLeaveLobby}
         onCreateNewLobby={handleCreateNewLobby}
+        onHostForceRefresh={handleHostForceRefresh}
       />
 
       <SettingsModal

@@ -491,6 +491,10 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
 // Cache offscreen canvases for pixel-grid rendered images
 const pixelCanvasCache = new Map<string, HTMLCanvasElement>();
 
+export function clearPixelCache() {
+  pixelCanvasCache.clear();
+}
+
 export function drawImageElement(
   ctx: CanvasRenderingContext2D,
   imgElem: ImageElement,
@@ -1070,9 +1074,18 @@ export function drawRemoteCursor(
   cursor: RemoteCursor
 ) {
   ctx.save();
-  ctx.fillStyle = cursor.color || '#3b82f6';
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 1.5;
+  const color = cursor.color || '#3b82f6';
+
+  if (cursor.isDrawing) {
+    // Glowing active writing ring
+    ctx.beginPath();
+    ctx.arc(cursor.x, cursor.y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = color + '44';
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
 
   ctx.beginPath();
   ctx.moveTo(cursor.x, cursor.y);
@@ -1080,22 +1093,26 @@ export function drawRemoteCursor(
   ctx.lineTo(cursor.x + 6, cursor.y + 15);
   ctx.lineTo(cursor.x, cursor.y + 20);
   ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
   ctx.fill();
   ctx.stroke();
 
-  ctx.font = '12px sans-serif';
-  const tagPad = 4;
-  const metrics = ctx.measureText(cursor.userName);
+  ctx.font = 'bold 11px sans-serif';
+  const tagPad = 6;
+  const labelText = cursor.isDrawing ? `${cursor.userName} ✏️` : cursor.userName;
+  const metrics = ctx.measureText(labelText);
   const tagW = metrics.width + tagPad * 2;
   const tagH = 18;
 
-  ctx.fillStyle = cursor.color || '#3b82f6';
+  ctx.fillStyle = color;
   ctx.beginPath();
-  ctx.roundRect(cursor.x + 14, cursor.y + 14, tagW, tagH, 4);
+  ctx.roundRect(cursor.x + 14, cursor.y + 14, tagW, tagH, 5);
   ctx.fill();
 
   ctx.fillStyle = '#ffffff';
-  ctx.fillText(cursor.userName, cursor.x + 14 + tagPad, cursor.y + 14 + 13);
+  ctx.fillText(labelText, cursor.x + 14 + tagPad, cursor.y + 14 + 13);
 
   ctx.restore();
 }

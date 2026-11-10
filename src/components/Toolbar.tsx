@@ -22,7 +22,6 @@ import {
   Redo2,
   ZoomIn,
   ZoomOut,
-  Maximize2,
   Share2,
   Settings,
   Trash2,
@@ -31,6 +30,9 @@ import {
   Wand2,
   Check,
   Paintbrush,
+  Compass,
+  Crosshair,
+  RefreshCw,
 } from 'lucide-react';
 import type { Tool, ShapeType, BoardSettings, ToolSettings, CanvasElement } from '../types';
 
@@ -66,6 +68,9 @@ interface ToolbarProps {
   onBringToFront: () => void;
   onSendToBack: () => void;
   onUpdateCircleRadius?: (radius: number) => void;
+  isHost?: boolean;
+  onHostForceRefresh?: () => void;
+  onRecenterBoard?: () => void;
 }
 
 const PEN_COLORS = [
@@ -148,6 +153,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onBringToFront,
   onSendToBack,
   onUpdateCircleRadius,
+  isHost,
+  onHostForceRefresh,
+  onRecenterBoard,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showSubMenu, setShowSubMenu] = useState<Tool | null>('pen');
@@ -293,6 +301,44 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             flexShrink: 0,
           }}
         >
+          {/* Przycisk wyśrodkowania na środek tablicy */}
+          <button
+            className="glass-btn"
+            onClick={onRecenterBoard || onResetZoom}
+            title="Powrót na środek tablicy (Wyśrodkuj widok / Home)"
+            style={{
+              padding: '6px 10px',
+              gap: 5,
+              color: '#38bdf8',
+              fontWeight: 600,
+              fontSize: 12,
+            }}
+          >
+            <Compass size={15} />
+            <span className="hidden-mobile">Środek</span>
+          </button>
+
+          {/* Opcja dla Hosta: Wymuszenie odświeżenia obrazków u wszystkich */}
+          {isHost && onHostForceRefresh && (
+            <button
+              className="glass-btn"
+              onClick={onHostForceRefresh}
+              title="Wymuś odświeżenie i zsynchronizowanie obrazków u wszystkich użytkowników (Host)"
+              style={{
+                padding: '6px 10px',
+                gap: 5,
+                background: 'rgba(234, 179, 8, 0.18)',
+                color: '#facc15',
+                border: '1px solid rgba(250, 204, 21, 0.4)',
+                fontWeight: 600,
+                fontSize: 12,
+              }}
+            >
+              <RefreshCw size={14} />
+              <span className="hidden-mobile">Odśwież obrazki</span>
+            </button>
+          )}
+
           <button
             className="glass-btn"
             onClick={onOpenShareModal}
@@ -1055,11 +1101,11 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
         <button
           className="glass-btn"
-          onClick={onResetZoom}
-          title="Wyśrodkuj"
-          style={{ width: 28, height: 28 }}
+          onClick={onRecenterBoard || onResetZoom}
+          title="Środek tablicy (Wyśrodkuj na rysunkach lub środku)"
+          style={{ width: 28, height: 28, color: '#38bdf8' }}
         >
-          <Maximize2 size={14} />
+          <Crosshair size={15} />
         </button>
       </div>
     </>

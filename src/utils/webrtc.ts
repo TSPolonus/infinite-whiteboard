@@ -37,7 +37,8 @@ export interface NetworkCallbacks {
   onPasswordRequired: () => void;
   onPasswordError: (msg: string) => void;
   onConnectionStatusChange: (status: 'disconnected' | 'connecting' | 'connected' | 'host') => void;
-  onNetworkError?: (msg: string) => void;
+  onForceRefreshImages?: () => void;
+  onNetworkError?: () => void;
 }
 
 interface WireEnvelope {
@@ -338,6 +339,10 @@ export class BoardNetworkManager {
 
       case 'cursor_move':
         this.callbacks.onCursorMove(msg.cursor);
+        break;
+
+      case 'force_refresh_images':
+        this.callbacks.onForceRefreshImages?.();
         break;
 
       case 'ping':
