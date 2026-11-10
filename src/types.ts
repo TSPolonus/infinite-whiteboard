@@ -1,6 +1,19 @@
 export type Tool = 'select' | 'pen' | 'highlighter' | 'eraser' | 'laser' | 'hand' | 'shape';
 
-export type ShapeType = 'rectangle' | 'circle' | 'triangle' | 'line' | 'arrow';
+export type ShapeType =
+  | 'rectangle'
+  | 'circle'
+  | 'triangle'
+  | 'line'
+  | 'arrow'
+  | 'double_arrow'
+  | 'diamond'
+  | 'star'
+  | 'hexagon'
+  | 'heart'
+  | 'speech_bubble';
+
+export type EraserMode = 'stroke' | 'pixel';
 
 export interface Point {
   x: number;
@@ -31,7 +44,8 @@ export interface ShapeElement {
   color: string;
   fillColor?: string;
   strokeWidth: number;
-  points?: Point[]; // for triangles or custom lines
+  points?: Point[];
+  rotation?: number;
   timestamp: number;
   userId?: string;
 }
@@ -45,6 +59,7 @@ export interface ImageElement {
   height: number;
   src: string;
   aspectRatio: number;
+  rotation?: number;
   timestamp: number;
   userId?: string;
 }
@@ -83,6 +98,9 @@ export interface BoardSettings {
   backgroundColor: string;
   gridType: 'dots' | 'lines' | 'none';
   gridSize: number;
+  palmRejection: boolean; // Stylus only draws, fingers pan/zoom
+  eraserMode: EraserMode; // 'stroke' vs 'pixel'
+  laserColor: string;
 }
 
 export type NetworkMessage =

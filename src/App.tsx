@@ -11,6 +11,7 @@ import type {
   BoardSettings,
   LaserPoint,
   RemoteCursor,
+  EraserMode,
 } from './types';
 import {
   screenToWorld,
@@ -22,7 +23,11 @@ import {
   drawSelectionBox,
   drawRemoteCursor,
   isPointInsideElement,
+  getElementBBox,
+  getHandleAtPoint,
+  eraseStrokePixels,
 } from './utils/canvasRenderer';
+import type { ResizeHandle } from './utils/canvasRenderer';
 import { detectShape } from './utils/shapeDetection';
 import { BoardNetworkManager } from './utils/webrtc';
 import { Toolbar } from './components/Toolbar';
@@ -47,6 +52,9 @@ export const App: React.FC = () => {
       backgroundColor: '#0f172a',
       gridType: 'dots',
       gridSize: 40,
+      palmRejection: true, // Default to true for tablets
+      eraserMode: 'stroke',
+      laserColor: '#f43f5e',
     };
   });
 
@@ -55,7 +63,7 @@ export const App: React.FC = () => {
   const [history, setHistory] = useState<CanvasElement[][]>([]);
   const [redoStack, setRedoStack] = useState<CanvasElement[][]>([]);
 
-  // Viewport transform (infinite canvas pan & zoom)
+  // Viewport transform
   const [transform, setTransform] = useState<ViewportTransform>({
     x: window.innerWidth / 2,
     y: window.innerHeight / 2,
@@ -76,8 +84,10 @@ export const App: React.FC = () => {
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState<Point | null>(null);
   const [elementInitialPos, setElementInitialPos] = useState<Point | null>(null);
+  const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandle | null>(null);
+  const [initialBBox, setInitialBBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
 
-  // Multi-touch gestures (pinch-to-zoom & two-finger pan)
+  // Multi-touch gestures
   const activePointers = useRef<Map<number, Point>>(new Map());
   const initialPinchDist = useRef<number | null>(null);
   const initialScale = useRef<number>(1);
@@ -85,7 +95,6 @@ export const App: React.FC = () => {
 
   // Auto-shape hold detection timer
   const holdTimerRef = useRef<number | null>(null);
-  const lastMoveTimeRef = useRef<number>(0);
 
   // Laser pointer trails
   const laserTrailsRef = useRef<LaserPoint[]>([]);
@@ -208,21 +217,22 @@ export const App: React.FC = () => {
     };
   }, [boardSettings.id]);
 
-  // Keyboard shortcuts (Undo, Redo, Space to Pan)
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
-        if (e.shiftKey) {
-          handleRedo();
-        } else {
-          handleUndo();
-        }
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
         e.preventDefault();
         handleRedo();
       } else if (e.code === 'Space' && !isSpacePressed.current) {
         isSpacePressed.current = true;
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedElementId && !(e.target instanceof HTMLInputElement)) {
+          handleDeleteSelected();
+        }
       }
     };
 
@@ -238,7 +248,7 @@ export const App: React.FC = () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [handleUndo, handleRedo]);
+  }, [handleUndo, handleRedo, selectedElementId]);
 
   // Image Paste Listener (Ctrl+V)
   useEffect(() => {
@@ -257,20 +267,34 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('paste', handlePaste);
   }, [transform]);
 
-  // Resize canvas to full window
+  // Resize canvas with devicePixelRatio for ultra-sharp stylus tracking
   useEffect(() => {
     const resize = () => {
       const canvas = canvasRef.current;
       if (!canvas) return;
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+      canvas.style.width = `${window.innerWidth}px`;
+      canvas.style.height = `${window.innerHeight}px`;
     };
     resize();
     window.addEventListener('resize', resize);
     return () => window.removeEventListener('resize', resize);
   }, []);
 
-  // Main Render Loop (Canvas Animation Frame)
+  // Accurate Stylus & Touch Coordinate Calculation
+  const getCanvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { screenPos: { x: e.clientX, y: e.clientY }, worldPos: screenToWorld(e.clientX, e.clientY, transform) };
+    const rect = canvas.getBoundingClientRect();
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
+    const worldPos = screenToWorld(screenX, screenY, transform);
+    return { screenPos: { x: screenX, y: screenY }, worldPos };
+  };
+
+  // Main Render Loop
   useEffect(() => {
     let animId: number;
 
@@ -280,16 +304,22 @@ export const App: React.FC = () => {
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
+      const dpr = window.devicePixelRatio || 1;
       const now = Date.now();
 
-      ctx.fillStyle = boardSettings.backgroundColor;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      ctx.scale(dpr, dpr);
 
+      // Background
+      ctx.fillStyle = boardSettings.backgroundColor;
+      ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+
+      // Grid
       const isDark = boardSettings.backgroundColor !== '#ffffff' && boardSettings.backgroundColor !== '#f8fafc';
       drawGrid(
         ctx,
-        canvas.width,
-        canvas.height,
+        window.innerWidth,
+        window.innerHeight,
         transform,
         boardSettings.gridType,
         boardSettings.gridSize,
@@ -300,6 +330,7 @@ export const App: React.FC = () => {
       ctx.translate(transform.x, transform.y);
       ctx.scale(transform.scale, transform.scale);
 
+      // 1. Elements
       for (const el of elements) {
         if (el.type === 'stroke') {
           drawStroke(ctx, el);
@@ -310,6 +341,7 @@ export const App: React.FC = () => {
         }
       }
 
+      // 2. Active stroke or shape preview
       if (isDrawing && currentStroke.length > 0) {
         if (snappedShape) {
           drawShape(ctx, snappedShape);
@@ -326,7 +358,7 @@ export const App: React.FC = () => {
             height: Math.abs(pn.y - p0.y),
             color: color,
             strokeWidth: strokeWidth,
-            points: currentShape === 'line' || currentShape === 'arrow' ? [p0, pn] : undefined,
+            points: currentShape === 'line' || currentShape === 'arrow' || currentShape === 'double_arrow' ? [p0, pn] : undefined,
             timestamp: now,
           };
           drawShape(ctx, tempShape);
@@ -345,9 +377,11 @@ export const App: React.FC = () => {
         }
       }
 
-      laserTrailsRef.current = laserTrailsRef.current.filter((p) => now - p.timestamp < 1400);
+      // 3. Laser trails
+      laserTrailsRef.current = laserTrailsRef.current.filter((p) => now - p.timestamp < 1600);
       drawLaserTrails(ctx, laserTrailsRef.current, now);
 
+      // 4. Selection box & handles
       if (selectedElementId) {
         const selected = elements.find((e) => e.id === selectedElementId);
         if (selected) {
@@ -355,12 +389,14 @@ export const App: React.FC = () => {
         }
       }
 
+      // 5. Remote Cursors
       for (const [, cursor] of remoteCursors) {
         if (now - cursor.lastActive < 10000) {
           drawRemoteCursor(ctx, cursor);
         }
       }
 
+      ctx.restore();
       ctx.restore();
 
       animId = requestAnimationFrame(render);
@@ -383,15 +419,14 @@ export const App: React.FC = () => {
     remoteCursors,
   ]);
 
-  // Pointer Event Handlers
+  // Pointer Down Handler
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
 
-    const screenPos = { x: e.clientX, y: e.clientY };
-    const worldPos = screenToWorld(e.clientX, e.clientY, transform);
-
+    const { screenPos, worldPos } = getCanvasPoint(e);
     activePointers.current.set(e.pointerId, screenPos);
 
+    // 1. Multi-touch gesture (Pinch-to-zoom / Two-finger pan)
     if (activePointers.current.size === 2) {
       const pts = Array.from(activePointers.current.values());
       initialPinchDist.current = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
@@ -404,12 +439,43 @@ export const App: React.FC = () => {
 
     if (activePointers.current.size > 2) return;
 
+    // 2. PALM REJECTION MODE:
+    // If enabled, fingers / palm ONLY pan the canvas, while stylus draws!
+    if (boardSettings.palmRejection && e.pointerType === 'touch') {
+      setDragStart(screenPos);
+      return;
+    }
+
+    // 3. Manual Pan (Hand tool, spacebar, or middle click)
     if (isSpacePressed.current || currentTool === 'hand' || e.button === 1) {
       setDragStart(screenPos);
       return;
     }
 
+    // 4. Select Tool: Check resize handles first, then element hit
     if (currentTool === 'select') {
+      if (selectedElementId) {
+        const selected = elements.find((el) => el.id === selectedElementId);
+        if (selected) {
+          const handle = getHandleAtPoint(worldPos, selected, transform);
+          if (handle) {
+            setActiveResizeHandle(handle);
+            setDragStart(worldPos);
+            const bbox = getElementBBox(selected);
+            if (bbox) {
+              setInitialBBox({
+                x: bbox.minX,
+                y: bbox.minY,
+                width: bbox.maxX - bbox.minX,
+                height: bbox.maxY - bbox.minY,
+              });
+            }
+            return;
+          }
+        }
+      }
+
+      // Hit test elements
       const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
       if (hit) {
         setSelectedElementId(hit.id);
@@ -417,57 +483,67 @@ export const App: React.FC = () => {
         setElementInitialPos({ x: (hit as any).x || 0, y: (hit as any).y || 0 });
       } else {
         setSelectedElementId(null);
+        setActiveResizeHandle(null);
       }
       return;
     }
 
+    // 5. Eraser Tool: object vs pixel erase
     if (currentTool === 'eraser') {
-      const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
-      if (hit) {
-        const next = elements.filter((el) => el.id !== hit.id);
-        pushToHistory(next);
-        networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
+      if (boardSettings.eraserMode === 'stroke') {
+        const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
+        if (hit) {
+          const next = elements.filter((el) => el.id !== hit.id);
+          pushToHistory(next);
+          networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
+        }
+      } else {
+        // Pixel eraser start
+        applyPixelEraser(worldPos);
       }
       return;
     }
 
+    // 6. Laser Pointer Tool
     if (currentTool === 'laser') {
       setIsDrawing(true);
       const lp: LaserPoint = {
         x: worldPos.x,
         y: worldPos.y,
         timestamp: Date.now(),
-        color: '#f43f5e',
-        size: 8,
+        color: boardSettings.laserColor,
+        size: 10,
       };
       laserTrailsRef.current.push(lp);
       networkManagerRef.current?.broadcast({ type: 'laser_stroke', points: [lp] });
       return;
     }
 
+    // 7. Drawing Tools (Pen, Highlighter, Shape)
     setIsDrawing(true);
     setCurrentStroke([worldPos]);
     setSnappedShape(null);
-    lastMoveTimeRef.current = Date.now();
 
+    // Auto-shape hold timer
     if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
       holdTimerRef.current = window.setTimeout(() => {
         triggerAutoShapeSnap();
-      }, 450);
+      }, 420);
     }
   };
 
+  // Pointer Move Handler
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const screenPos = { x: e.clientX, y: e.clientY };
-    const worldPos = screenToWorld(e.clientX, e.clientY, transform);
+    const { screenPos, worldPos } = getCanvasPoint(e);
 
     if (activePointers.current.has(e.pointerId)) {
       activePointers.current.set(e.pointerId, screenPos);
     }
 
+    // Broadcast cursor position
     const now = Date.now();
-    if (now - lastLaserBroadcastRef.current > 60) {
+    if (now - lastLaserBroadcastRef.current > 50) {
       lastLaserBroadcastRef.current = now;
       networkManagerRef.current?.broadcast({
         type: 'cursor_move',
@@ -482,6 +558,7 @@ export const App: React.FC = () => {
       });
     }
 
+    // Multi-touch pinch & pan
     if (activePointers.current.size === 2 && initialPinchDist.current !== null) {
       const pts = Array.from(activePointers.current.values());
       const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
@@ -501,7 +578,8 @@ export const App: React.FC = () => {
       return;
     }
 
-    if (dragStart && (isSpacePressed.current || currentTool === 'hand' || e.buttons === 4)) {
+    // Palm rejection or Hand tool drag
+    if (dragStart && ((boardSettings.palmRejection && e.pointerType === 'touch') || isSpacePressed.current || currentTool === 'hand' || e.buttons === 4)) {
       const dx = screenPos.x - dragStart.x;
       const dy = screenPos.y - dragStart.y;
       setTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
@@ -509,7 +587,56 @@ export const App: React.FC = () => {
       return;
     }
 
-    if (currentTool === 'select' && selectedElementId && dragStart && elementInitialPos) {
+    // Rescaling selected element via handle
+    if (currentTool === 'select' && selectedElementId && activeResizeHandle && dragStart && initialBBox) {
+      const dx = worldPos.x - dragStart.x;
+      const dy = worldPos.y - dragStart.y;
+
+      setElements((prev) =>
+        prev.map((el) => {
+          if (el.id !== selectedElementId) return el;
+
+          if (activeResizeHandle === 'rotate') {
+            const cx = initialBBox.x + initialBBox.width / 2;
+            const cy = initialBBox.y + initialBBox.height / 2;
+            const rad = Math.atan2(worldPos.y - cy, worldPos.x - cx);
+            const deg = (rad * 180) / Math.PI + 90;
+            return { ...el, rotation: Math.round(deg) };
+          }
+
+          if (el.type === 'shape' || el.type === 'image') {
+            let newX = initialBBox.x;
+            let newY = initialBBox.y;
+            let newW = initialBBox.width;
+            let newH = initialBBox.height;
+
+            if (activeResizeHandle.includes('r')) newW = Math.max(20, initialBBox.width + dx);
+            if (activeResizeHandle.includes('b')) newH = Math.max(20, initialBBox.height + dy);
+            if (activeResizeHandle.includes('l')) {
+              const proposedW = initialBBox.width - dx;
+              if (proposedW > 20) {
+                newX = initialBBox.x + dx;
+                newW = proposedW;
+              }
+            }
+            if (activeResizeHandle.includes('t')) {
+              const proposedH = initialBBox.height - dy;
+              if (proposedH > 20) {
+                newY = initialBBox.y + dy;
+                newH = proposedH;
+              }
+            }
+
+            return { ...el, x: newX, y: newY, width: newW, height: newH };
+          }
+          return el;
+        })
+      );
+      return;
+    }
+
+    // Move selected element
+    if (currentTool === 'select' && selectedElementId && dragStart && elementInitialPos && !activeResizeHandle) {
       const dx = worldPos.x - dragStart.x;
       const dy = worldPos.y - dragStart.y;
 
@@ -534,32 +661,38 @@ export const App: React.FC = () => {
       return;
     }
 
-    if (currentTool === 'eraser' && e.buttons === 1) {
-      const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
-      if (hit) {
-        const next = elements.filter((el) => el.id !== hit.id);
-        pushToHistory(next);
-        networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
+    // Eraser on drag
+    if (currentTool === 'eraser' && (e.buttons === 1 || e.pointerType === 'pen')) {
+      if (boardSettings.eraserMode === 'stroke') {
+        const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
+        if (hit) {
+          const next = elements.filter((el) => el.id !== hit.id);
+          pushToHistory(next);
+          networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
+        }
+      } else {
+        applyPixelEraser(worldPos);
       }
       return;
     }
 
+    // Laser pointer drag
     if (currentTool === 'laser' && isDrawing) {
       const lp: LaserPoint = {
         x: worldPos.x,
         y: worldPos.y,
         timestamp: Date.now(),
-        color: '#f43f5e',
-        size: 8,
+        color: boardSettings.laserColor,
+        size: 10,
       };
       laserTrailsRef.current.push(lp);
       networkManagerRef.current?.broadcast({ type: 'laser_stroke', points: [lp] });
       return;
     }
 
+    // Freehand stroke / shape drawing
     if (isDrawing) {
       setCurrentStroke((prev) => [...prev, worldPos]);
-      lastMoveTimeRef.current = Date.now();
 
       if (autoShapeEnabled && (currentTool === 'pen' || currentTool === 'highlighter')) {
         if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
@@ -570,6 +703,36 @@ export const App: React.FC = () => {
     }
   };
 
+  // Pixel Eraser logic
+  const applyPixelEraser = (erasePoint: Point) => {
+    const eraserRadius = Math.max(16, strokeWidth * 2.5);
+    let changed = false;
+    let nextElements: CanvasElement[] = [];
+
+    for (const el of elements) {
+      if (el.type === 'stroke') {
+        const result = eraseStrokePixels(el, erasePoint, eraserRadius);
+        if (result.length !== 1 || result[0].points.length !== el.points.length) {
+          changed = true;
+          nextElements.push(...result);
+        } else {
+          nextElements.push(el);
+        }
+      } else {
+        if (isPointInsideElement(erasePoint, el)) {
+          changed = true;
+        } else {
+          nextElements.push(el);
+        }
+      }
+    }
+
+    if (changed) {
+      pushToHistory(nextElements);
+    }
+  };
+
+  // Auto Shape Detection
   const triggerAutoShapeSnap = () => {
     setCurrentStroke((latestPoints) => {
       if (latestPoints.length < 6) return latestPoints;
@@ -594,6 +757,7 @@ export const App: React.FC = () => {
     });
   };
 
+  // Pointer Up Handler
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     activePointers.current.delete(e.pointerId);
     if (activePointers.current.size < 2) {
@@ -607,6 +771,8 @@ export const App: React.FC = () => {
 
     setDragStart(null);
     setElementInitialPos(null);
+    setActiveResizeHandle(null);
+    setInitialBBox(null);
 
     if (!isDrawing) return;
     setIsDrawing(false);
@@ -630,7 +796,7 @@ export const App: React.FC = () => {
         y: Math.min(p0.y, pn.y),
         width: Math.abs(pn.x - p0.x),
         height: Math.abs(pn.y - p0.y),
-        points: currentShape === 'line' || currentShape === 'arrow' ? [p0, pn] : undefined,
+        points: currentShape === 'line' || currentShape === 'arrow' || currentShape === 'double_arrow' ? [p0, pn] : undefined,
         color: color,
         strokeWidth: strokeWidth,
         timestamp: Date.now(),
@@ -681,6 +847,7 @@ export const App: React.FC = () => {
     }
   };
 
+  // Zoom control buttons
   const handleZoomIn = () => {
     setTransform((prev) => {
       const newScale = Math.min(5, prev.scale * 1.25);
@@ -715,6 +882,79 @@ export const App: React.FC = () => {
     });
   };
 
+  // Selected Element Transformation Handlers
+  const handleDuplicateSelected = () => {
+    if (!selectedElementId) return;
+    const target = elements.find((el) => el.id === selectedElementId);
+    if (!target) return;
+
+    const offset = 30;
+    let cloned: CanvasElement;
+
+    if (target.type === 'shape') {
+      cloned = {
+        ...target,
+        id: 'shape_' + Math.random().toString(36).substring(2, 9),
+        x: target.x + offset,
+        y: target.y + offset,
+      };
+    } else if (target.type === 'image') {
+      cloned = {
+        ...target,
+        id: 'img_' + Math.random().toString(36).substring(2, 9),
+        x: target.x + offset,
+        y: target.y + offset,
+      };
+      if (imageCacheRef.current.has(target.id)) {
+        imageCacheRef.current.set(cloned.id, imageCacheRef.current.get(target.id)!);
+      }
+    } else {
+      cloned = {
+        ...target,
+        id: 'stroke_' + Math.random().toString(36).substring(2, 9),
+        points: target.points.map((p) => ({ x: p.x + offset, y: p.y + offset })),
+      };
+    }
+
+    pushToHistory([...elements, cloned]);
+    setSelectedElementId(cloned.id);
+  };
+
+  const handleRotateSelected = () => {
+    if (!selectedElementId) return;
+    setElements((prev) =>
+      prev.map((el) => {
+        if (el.id !== selectedElementId) return el;
+        const currentRot = (el as any).rotation || 0;
+        return { ...el, rotation: (currentRot + 90) % 360 };
+      })
+    );
+  };
+
+  const handleDeleteSelected = () => {
+    if (!selectedElementId) return;
+    const next = elements.filter((el) => el.id !== selectedElementId);
+    pushToHistory(next);
+    setSelectedElementId(null);
+    networkManagerRef.current?.broadcast({ type: 'element_delete', id: selectedElementId });
+  };
+
+  const handleBringToFront = () => {
+    if (!selectedElementId) return;
+    const target = elements.find((el) => el.id === selectedElementId);
+    if (!target) return;
+    const next = [...elements.filter((el) => el.id !== selectedElementId), target];
+    pushToHistory(next);
+  };
+
+  const handleSendToBack = () => {
+    if (!selectedElementId) return;
+    const target = elements.find((el) => el.id === selectedElementId);
+    if (!target) return;
+    const next = [target, ...elements.filter((el) => el.id !== selectedElementId)];
+    pushToHistory(next);
+  };
+
   const handleImageUpload = (file: File) => {
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -744,11 +984,13 @@ export const App: React.FC = () => {
           height: h,
           src: src,
           aspectRatio: img.naturalWidth / img.naturalHeight,
+          rotation: 0,
           timestamp: Date.now(),
         };
 
         imageCacheRef.current.set(imgElement.id, img);
         pushToHistory([...elements, imgElement]);
+        setSelectedElementId(imgElement.id);
         networkManagerRef.current?.broadcast({ type: 'element_add', element: imgElement });
       };
       img.src = src;
@@ -760,6 +1002,7 @@ export const App: React.FC = () => {
     if (elements.length === 0) return;
     if (confirm('Czy na pewno chcesz wyczyścić całą tablicę?')) {
       pushToHistory([]);
+      setSelectedElementId(null);
       networkManagerRef.current?.broadcast({
         type: 'board_sync',
         elements: [],
@@ -771,7 +1014,6 @@ export const App: React.FC = () => {
   const handleExportPNG = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const link = document.createElement('a');
     link.download = `${boardSettings.title || 'tablica'}.png`;
     link.href = canvas.toDataURL('image/png');
@@ -809,7 +1051,7 @@ export const App: React.FC = () => {
 
   const handleExportJSON = () => {
     const data = {
-      version: 1,
+      version: 2,
       settings: boardSettings,
       elements: elements,
     };
@@ -849,7 +1091,9 @@ export const App: React.FC = () => {
           height: '100%',
           display: 'block',
           cursor:
-            currentTool === 'hand' || isSpacePressed.current
+            activeResizeHandle
+              ? 'crosshair'
+              : currentTool === 'hand' || isSpacePressed.current
               ? 'grab'
               : currentTool === 'laser'
               ? 'crosshair'
@@ -871,11 +1115,18 @@ export const App: React.FC = () => {
         canRedo={redoStack.length > 0}
         boardSettings={boardSettings}
         connectedCount={connectedCount}
+        selectedElementId={selectedElementId}
         onToolChange={setCurrentTool}
         onShapeChange={setCurrentShape}
         onColorChange={setColor}
         onStrokeWidthChange={setStrokeWidth}
         onToggleAutoShape={() => setAutoShapeEnabled((prev) => !prev)}
+        onTogglePalmRejection={() =>
+          setBoardSettings((prev) => ({ ...prev, palmRejection: !prev.palmRejection }))
+        }
+        onEraserModeChange={(mode: EraserMode) =>
+          setBoardSettings((prev) => ({ ...prev, eraserMode: mode }))
+        }
         onUndo={handleUndo}
         onRedo={handleRedo}
         onZoomIn={handleZoomIn}
@@ -885,6 +1136,11 @@ export const App: React.FC = () => {
         onClearCanvas={handleClearCanvas}
         onOpenShareModal={() => setIsShareModalOpen(true)}
         onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
+        onDuplicateSelected={handleDuplicateSelected}
+        onRotateSelected={handleRotateSelected}
+        onDeleteSelected={handleDeleteSelected}
+        onBringToFront={handleBringToFront}
+        onSendToBack={handleSendToBack}
       />
 
       <ShareModal

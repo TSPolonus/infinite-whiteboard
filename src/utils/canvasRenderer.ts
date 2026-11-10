@@ -9,6 +9,8 @@ import type {
   Point,
 } from '../types';
 
+export type ResizeHandle = 'tl' | 'tr' | 'bl' | 'br' | 't' | 'b' | 'l' | 'r' | 'rotate';
+
 export function screenToWorld(
   screenX: number,
   screenY: number,
@@ -100,7 +102,6 @@ export function drawStroke(
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.strokeStyle = stroke.color;
-  ctx.lineWidth = stroke.size;
 
   if (stroke.tool === 'highlighter') {
     ctx.globalAlpha = stroke.opacity || 0.45;
@@ -108,6 +109,7 @@ export function drawStroke(
     ctx.lineCap = 'square';
   } else {
     ctx.globalAlpha = stroke.opacity || 1.0;
+    ctx.lineWidth = stroke.size;
   }
 
   const points = stroke.points;
@@ -120,6 +122,7 @@ export function drawStroke(
     return;
   }
 
+  // Draw smooth curve with pressure sensitivity if available
   ctx.beginPath();
   ctx.moveTo(points[0].x, points[0].y);
 
@@ -149,7 +152,16 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
     ctx.fillStyle = shape.fillColor;
   }
 
-  const { x, y, width, height, shapeType } = shape;
+  const { x, y, width, height, shapeType, rotation = 0 } = shape;
+
+  // Apply rotation around center if present
+  if (rotation !== 0) {
+    const cx = x + width / 2;
+    const cy = y + height / 2;
+    ctx.translate(cx, cy);
+    ctx.rotate((rotation * Math.PI) / 180);
+    ctx.translate(-cx, -cy);
+  }
 
   ctx.beginPath();
 
@@ -187,6 +199,99 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
       ctx.stroke();
       break;
     }
+    case 'diamond': {
+      ctx.moveTo(x + width / 2, y);
+      ctx.lineTo(x + width, y + height / 2);
+      ctx.lineTo(x + width / 2, y + height);
+      ctx.lineTo(x, y + height / 2);
+      ctx.closePath();
+      if (shape.fillColor) ctx.fill();
+      ctx.stroke();
+      break;
+    }
+    case 'hexagon': {
+      const cx = x + width / 2;
+      const cy = y + height / 2;
+      const rx = Math.abs(width) / 2;
+      const ry = Math.abs(height) / 2;
+      for (let i = 0; i < 6; i++) {
+        const angle = (Math.PI / 3) * i - Math.PI / 6;
+        const px = cx + rx * Math.cos(angle);
+        const py = cy + ry * Math.sin(angle);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      if (shape.fillColor) ctx.fill();
+      ctx.stroke();
+      break;
+    }
+    case 'star': {
+      const cx = x + width / 2;
+      const cy = y + height / 2;
+      const outerR = Math.min(Math.abs(width), Math.abs(height)) / 2;
+      const innerR = outerR * 0.42;
+      for (let i = 0; i < 10; i++) {
+        const r = i % 2 === 0 ? outerR : innerR;
+        const angle = (Math.PI / 5) * i - Math.PI / 2;
+        const px = cx + r * Math.cos(angle);
+        const py = cy + r * Math.sin(angle);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      if (shape.fillColor) ctx.fill();
+      ctx.stroke();
+      break;
+    }
+    case 'heart': {
+      const topCurveHeight = height * 0.3;
+      ctx.moveTo(x + width / 2, y + topCurveHeight);
+      ctx.bezierCurveTo(
+        x + width / 2, y,
+        x, y,
+        x, y + topCurveHeight
+      );
+      ctx.bezierCurveTo(
+        x, y + (height + topCurveHeight) / 2,
+        x + width / 2, y + (height + topCurveHeight) / 1.5,
+        x + width / 2, y + height
+      );
+      ctx.bezierCurveTo(
+        x + width / 2, y + (height + topCurveHeight) / 1.5,
+        x + width, y + (height + topCurveHeight) / 2,
+        x + width, y + topCurveHeight
+      );
+      ctx.bezierCurveTo(
+        x + width, y,
+        x + width / 2, y,
+        x + width / 2, y + topCurveHeight
+      );
+      ctx.closePath();
+      if (shape.fillColor) ctx.fill();
+      ctx.stroke();
+      break;
+    }
+    case 'speech_bubble': {
+      const r = Math.min(16, Math.abs(width) / 5, Math.abs(height) / 5);
+      const bubbleH = height * 0.8;
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + width - r, y);
+      ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+      ctx.lineTo(x + width, y + bubbleH - r);
+      ctx.quadraticCurveTo(x + width, y + bubbleH, x + width - r, y + bubbleH);
+      ctx.lineTo(x + width * 0.45, y + bubbleH);
+      ctx.lineTo(x + width * 0.3, y + height);
+      ctx.lineTo(x + width * 0.25, y + bubbleH);
+      ctx.lineTo(x + r, y + bubbleH);
+      ctx.quadraticCurveTo(x, y + bubbleH, x, y + bubbleH - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+      if (shape.fillColor) ctx.fill();
+      ctx.stroke();
+      break;
+    }
     case 'line': {
       if (shape.points && shape.points.length >= 2) {
         ctx.moveTo(shape.points[0].x, shape.points[0].y);
@@ -207,7 +312,7 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
       ctx.stroke();
 
       const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-      const headLen = Math.max(12, shape.strokeWidth * 3.5);
+      const headLen = Math.max(14, shape.strokeWidth * 3.5);
       ctx.beginPath();
       ctx.moveTo(p2.x, p2.y);
       ctx.lineTo(
@@ -218,6 +323,43 @@ export function drawShape(ctx: CanvasRenderingContext2D, shape: ShapeElement) {
       ctx.lineTo(
         p2.x - headLen * Math.cos(angle + Math.PI / 6),
         p2.y - headLen * Math.sin(angle + Math.PI / 6)
+      );
+      ctx.stroke();
+      break;
+    }
+    case 'double_arrow': {
+      const p1 = shape.points && shape.points[0] ? shape.points[0] : { x, y };
+      const p2 =
+        shape.points && shape.points[1] ? shape.points[1] : { x: x + width, y: y + height };
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+
+      const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+      const headLen = Math.max(14, shape.strokeWidth * 3.5);
+
+      // End arrow
+      ctx.beginPath();
+      ctx.moveTo(p2.x, p2.y);
+      ctx.lineTo(
+        p2.x - headLen * Math.cos(angle - Math.PI / 6),
+        p2.y - headLen * Math.sin(angle - Math.PI / 6)
+      );
+      ctx.moveTo(p2.x, p2.y);
+      ctx.lineTo(
+        p2.x - headLen * Math.cos(angle + Math.PI / 6),
+        p2.y - headLen * Math.sin(angle + Math.PI / 6)
+      );
+      // Start arrow
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(
+        p1.x + headLen * Math.cos(angle - Math.PI / 6),
+        p1.y + headLen * Math.sin(angle - Math.PI / 6)
+      );
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(
+        p1.x + headLen * Math.cos(angle + Math.PI / 6),
+        p1.y + headLen * Math.sin(angle + Math.PI / 6)
       );
       ctx.stroke();
       break;
@@ -239,18 +381,27 @@ export function drawImageElement(
     imageCache.set(imgElem.id, img);
   }
 
+  ctx.save();
+  const rotation = imgElem.rotation || 0;
+  if (rotation !== 0) {
+    const cx = imgElem.x + imgElem.width / 2;
+    const cy = imgElem.y + imgElem.height / 2;
+    ctx.translate(cx, cy);
+    ctx.rotate((rotation * Math.PI) / 180);
+    ctx.translate(-cx, -cy);
+  }
+
   if (img.complete && img.naturalWidth > 0) {
     ctx.drawImage(img, imgElem.x, imgElem.y, imgElem.width, imgElem.height);
   } else {
-    ctx.save();
     ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
     ctx.lineWidth = 2;
     ctx.setLineDash([4, 4]);
     ctx.strokeRect(imgElem.x, imgElem.y, imgElem.width, imgElem.height);
     ctx.fillRect(imgElem.x, imgElem.y, imgElem.width, imgElem.height);
-    ctx.restore();
   }
+  ctx.restore();
 }
 
 export function drawLaserTrails(
@@ -258,9 +409,9 @@ export function drawLaserTrails(
   laserPoints: LaserPoint[],
   now: number
 ) {
-  if (laserPoints.length < 2) return;
+  if (laserPoints.length === 0) return;
 
-  const MAX_AGE = 1400;
+  const MAX_AGE = 1600; // ms trail lifetime
 
   ctx.save();
   ctx.lineCap = 'round';
@@ -273,45 +424,61 @@ export function drawLaserTrails(
     if (age >= MAX_AGE) continue;
 
     const progress = 1 - age / MAX_AGE;
-    const alpha = progress * 0.9;
-    const width = p2.size * progress;
+    const alpha = Math.pow(progress, 1.4);
+    const laserColor = p2.color || '#f43f5e';
 
+    // 1. Wide ambient glowing halo
     ctx.beginPath();
-    ctx.strokeStyle = p2.color || '#ff0055';
-    ctx.globalAlpha = alpha * 0.35;
-    ctx.lineWidth = width * 3;
-    ctx.shadowColor = p2.color || '#ff0055';
-    ctx.shadowBlur = 12;
+    ctx.strokeStyle = laserColor;
+    ctx.globalAlpha = alpha * 0.3;
+    ctx.lineWidth = p2.size * 3.8 * progress;
+    ctx.shadowColor = laserColor;
+    ctx.shadowBlur = 18;
     ctx.moveTo(p1.x, p1.y);
     ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
 
+    // 2. Saturated mid-glow
+    ctx.beginPath();
+    ctx.strokeStyle = laserColor;
+    ctx.globalAlpha = alpha * 0.8;
+    ctx.lineWidth = p2.size * 1.8 * progress;
+    ctx.shadowBlur = 8;
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+
+    // 3. Ultra-bright white core
     ctx.beginPath();
     ctx.strokeStyle = '#ffffff';
     ctx.globalAlpha = alpha;
-    ctx.lineWidth = Math.max(2, width * 0.6);
+    ctx.lineWidth = Math.max(2, p2.size * 0.6 * progress);
     ctx.shadowBlur = 0;
     ctx.moveTo(p1.x, p1.y);
     ctx.lineTo(p2.x, p2.y);
     ctx.stroke();
   }
 
+  // Draw glowing pulse dot at the tip
   const last = laserPoints[laserPoints.length - 1];
   const lastAge = now - last.timestamp;
   if (lastAge < MAX_AGE) {
+    const laserColor = last.color || '#f43f5e';
     const pulseAlpha = 1 - lastAge / MAX_AGE;
+
     ctx.beginPath();
-    ctx.arc(last.x, last.y, last.size * 1.5, 0, Math.PI * 2);
-    ctx.fillStyle = last.color || '#ff0055';
-    ctx.globalAlpha = pulseAlpha * 0.8;
-    ctx.shadowColor = last.color || '#ff0055';
-    ctx.shadowBlur = 16;
+    ctx.arc(last.x, last.y, last.size * 2, 0, Math.PI * 2);
+    ctx.fillStyle = laserColor;
+    ctx.globalAlpha = pulseAlpha * 0.7;
+    ctx.shadowColor = laserColor;
+    ctx.shadowBlur = 20;
     ctx.fill();
 
     ctx.beginPath();
     ctx.arc(last.x, last.y, last.size * 0.8, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
     ctx.globalAlpha = pulseAlpha;
+    ctx.shadowBlur = 0;
     ctx.fill();
   }
 
@@ -326,37 +493,104 @@ export function drawSelectionBox(
   const bbox = getElementBBox(element);
   if (!bbox) return;
 
-  const pad = 6;
+  const pad = 8;
   const x = bbox.minX - pad;
   const y = bbox.minY - pad;
   const w = bbox.maxX - bbox.minX + pad * 2;
   const h = bbox.maxY - bbox.minY + pad * 2;
 
   ctx.save();
-  ctx.strokeStyle = '#3b82f6';
+  ctx.strokeStyle = '#38bdf8';
   ctx.lineWidth = 1.5 / transform.scale;
   ctx.setLineDash([4 / transform.scale, 4 / transform.scale]);
   ctx.strokeRect(x, y, w, h);
 
-  const handleSize = 8 / transform.scale;
+  // Resize handles
+  const handleSize = 10 / transform.scale;
   ctx.fillStyle = '#ffffff';
-  ctx.strokeStyle = '#3b82f6';
+  ctx.strokeStyle = '#0284c7';
   ctx.setLineDash([]);
   ctx.lineWidth = 2 / transform.scale;
 
-  const corners = [
-    { x: x, y: y },
-    { x: x + w, y: y },
-    { x: x, y: y + h },
-    { x: x + w, y: y + h },
+  const handles = [
+    { x: x, y: y },                 // tl
+    { x: x + w / 2, y: y },         // t
+    { x: x + w, y: y },             // tr
+    { x: x + w, y: y + h / 2 },     // r
+    { x: x + w, y: y + h },         // br
+    { x: x + w / 2, y: y + h },     // b
+    { x: x, y: y + h },             // bl
+    { x: x, y: y + h / 2 },         // l
   ];
 
-  for (const c of corners) {
-    ctx.fillRect(c.x - handleSize / 2, c.y - handleSize / 2, handleSize, handleSize);
-    ctx.strokeRect(c.x - handleSize / 2, c.y - handleSize / 2, handleSize, handleSize);
+  for (const hPos of handles) {
+    ctx.fillRect(hPos.x - handleSize / 2, hPos.y - handleSize / 2, handleSize, handleSize);
+    ctx.strokeRect(hPos.x - handleSize / 2, hPos.y - handleSize / 2, handleSize, handleSize);
   }
 
+  // Rotation Handle at top
+  const rotDist = 26 / transform.scale;
+  const rotX = x + w / 2;
+  const rotY = y - rotDist;
+
+  ctx.beginPath();
+  ctx.setLineDash([2 / transform.scale, 2 / transform.scale]);
+  ctx.moveTo(x + w / 2, y);
+  ctx.lineTo(rotX, rotY);
+  ctx.stroke();
+
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.arc(rotX, rotY, handleSize * 0.65, 0, Math.PI * 2);
+  ctx.fillStyle = '#38bdf8';
+  ctx.fill();
+  ctx.stroke();
+
   ctx.restore();
+}
+
+export function getHandleAtPoint(
+  worldPos: Point,
+  element: CanvasElement,
+  transform: ViewportTransform
+): ResizeHandle | null {
+  const bbox = getElementBBox(element);
+  if (!bbox) return null;
+
+  const pad = 8;
+  const x = bbox.minX - pad;
+  const y = bbox.minY - pad;
+  const w = bbox.maxX - bbox.minX + pad * 2;
+  const h = bbox.maxY - bbox.minY + pad * 2;
+  const threshold = 14 / transform.scale;
+
+  // Rotation handle check
+  const rotDist = 26 / transform.scale;
+  const rotX = x + w / 2;
+  const rotY = y - rotDist;
+  if (Math.hypot(worldPos.x - rotX, worldPos.y - rotY) <= threshold) {
+    return 'rotate';
+  }
+
+  // Corner and edge handles
+  const handles: { handle: ResizeHandle; x: number; y: number }[] = [
+    { handle: 'tl', x: x, y: y },
+    { handle: 't', x: x + w / 2, y: y },
+    { handle: 'tr', x: x + w, y: y },
+    { handle: 'r', x: x + w, y: y + h / 2 },
+    { handle: 'br', x: x + w, y: y + h },
+    { handle: 'b', x: x + w / 2, y: y + h },
+    { handle: 'bl', x: x, y: y + h },
+    { handle: 'l', x: x, y: y + h / 2 },
+  ];
+
+  for (const hPos of handles) {
+    if (Math.hypot(worldPos.x - hPos.x, worldPos.y - hPos.y) <= threshold) {
+      return hPos.handle;
+    }
+  }
+
+  return null;
 }
 
 export function drawRemoteCursor(
@@ -449,7 +683,7 @@ export function isPointInsideElement(point: Point, element: CanvasElement): bool
     const p1 = element.points[i];
     const p2 = element.points[i + 1];
     const d = distToSegment(point, p1, p2);
-    if (d <= Math.max(12, element.size / 2 + 6)) {
+    if (d <= Math.max(14, element.size / 2 + 8)) {
       return true;
     }
   }
@@ -463,4 +697,40 @@ function distToSegment(p: Point, a: Point, b: Point): number {
   let t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / l2;
   t = Math.max(0, Math.min(1, t));
   return Math.hypot(p.x - (a.x + t * (b.x - a.x)), p.y - (a.y + t * (b.y - a.y)));
+}
+
+// Pixel / Segment Eraser helper
+export function eraseStrokePixels(
+  stroke: StrokeElement,
+  erasePoint: Point,
+  radius: number
+): StrokeElement[] {
+  const newStrokes: StrokeElement[] = [];
+  let currentSegment: Point[] = [];
+
+  for (const p of stroke.points) {
+    const d = Math.hypot(p.x - erasePoint.x, p.y - erasePoint.y);
+    if (d > radius) {
+      currentSegment.push(p);
+    } else {
+      if (currentSegment.length >= 2) {
+        newStrokes.push({
+          ...stroke,
+          id: 'stroke_' + Math.random().toString(36).substring(2, 9),
+          points: currentSegment,
+        });
+      }
+      currentSegment = [];
+    }
+  }
+
+  if (currentSegment.length >= 2) {
+    newStrokes.push({
+      ...stroke,
+      id: 'stroke_' + Math.random().toString(36).substring(2, 9),
+      points: currentSegment,
+    });
+  }
+
+  return newStrokes;
 }

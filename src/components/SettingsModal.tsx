@@ -8,6 +8,9 @@ import {
   Smartphone,
   Grid,
   Palette,
+  Sparkles,
+  Scissors,
+  Check,
 } from 'lucide-react';
 import type { BoardSettings, CanvasElement } from '../types';
 
@@ -27,6 +30,13 @@ const BG_PRESETS = [
   { name: 'Czysty czarny', value: '#000000' },
   { name: 'Biały', value: '#ffffff' },
   { name: 'Jasnoszary', value: '#f8fafc' },
+];
+
+const LASER_COLORS = [
+  { name: 'Neon Czerwony', value: '#f43f5e' },
+  { name: 'Neon Błękit', value: '#38bdf8' },
+  { name: 'Neon Zieleń', value: '#22c55e' },
+  { name: 'Neon Fiolet', value: '#c084fc' },
 ];
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -73,6 +83,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         style={{
           width: '100%',
           maxWidth: 480,
+          maxHeight: '90vh',
+          overflowY: 'auto',
           borderRadius: 20,
           padding: 24,
           background: '#1e293b',
@@ -90,7 +102,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           }}
         >
           <h3 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>
-            Ustawienia i Eksport
+            Ustawienia i Rysik
           </h3>
           <button
             className="glass-btn"
@@ -99,6 +111,119 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <X size={18} />
           </button>
+        </div>
+
+        {/* Wsparcie Rysika i Ochrona przed dłonią (Palm Rejection) */}
+        <div
+          style={{
+            background: 'rgba(56, 189, 248, 0.1)',
+            border: '1px solid rgba(56, 189, 248, 0.3)',
+            borderRadius: 14,
+            padding: 14,
+            marginBottom: 20,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 18 }}>✍️</span>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: '#f8fafc' }}>
+                  Ochrona przed dłonią (Palm Rejection)
+                </div>
+                <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                  Tylko rysik rysuje, dotyk palcem/dłonią przesuwa tablicę
+                </div>
+              </div>
+            </div>
+
+            <label style={{ position: 'relative', display: 'inline-block', width: 44, height: 24, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={boardSettings.palmRejection}
+                onChange={(e) => onUpdateSettings({ palmRejection: e.target.checked })}
+                style={{ opacity: 0, width: 0, height: 0 }}
+              />
+              <span
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  backgroundColor: boardSettings.palmRejection ? '#38bdf8' : '#334155',
+                  borderRadius: 24,
+                  transition: '0.2s',
+                }}
+              >
+                <span
+                  style={{
+                    position: 'absolute',
+                    height: 18,
+                    width: 18,
+                    left: boardSettings.palmRejection ? 22 : 3,
+                    bottom: 3,
+                    backgroundColor: 'white',
+                    borderRadius: '50%',
+                    transition: '0.2s',
+                  }}
+                />
+              </span>
+            </label>
+          </div>
+        </div>
+
+        {/* Tryb gumki: całe linie vs piksele */}
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ fontSize: 13, fontWeight: 600, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+            <Scissors size={16} color="#38bdf8" /> Tryb działania gumki
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <button
+              onClick={() => onUpdateSettings({ eraserMode: 'stroke' })}
+              className={`glass-btn ${boardSettings.eraserMode === 'stroke' ? 'active' : ''}`}
+              style={{ padding: '9px 12px', borderRadius: 10, fontSize: 13, gap: 6 }}
+            >
+              <span>Całe linie (Obiektowa)</span>
+              {boardSettings.eraserMode === 'stroke' && <Check size={14} />}
+            </button>
+            <button
+              onClick={() => onUpdateSettings({ eraserMode: 'pixel' })}
+              className={`glass-btn ${boardSettings.eraserMode === 'pixel' ? 'active' : ''}`}
+              style={{ padding: '9px 12px', borderRadius: 10, fontSize: 13, gap: 6 }}
+            >
+              <span>Piksele / Wycinanie</span>
+              {boardSettings.eraserMode === 'pixel' && <Check size={14} />}
+            </button>
+          </div>
+        </div>
+
+        {/* Kolor lasera wskaźnikowego */}
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ fontSize: 13, fontWeight: 600, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+            <Sparkles size={16} color="#f43f5e" /> Kolor wskaźnika laserowego
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+            {LASER_COLORS.map((lc) => (
+              <button
+                key={lc.value}
+                onClick={() => onUpdateSettings({ laserColor: lc.value })}
+                style={{
+                  padding: '7px 6px',
+                  borderRadius: 10,
+                  backgroundColor: 'rgba(15, 23, 42, 0.7)',
+                  border: boardSettings.laserColor === lc.value ? `2px solid ${lc.value}` : '1px solid rgba(255,255,255,0.1)',
+                  color: lc.value,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 4,
+                }}
+              >
+                <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: lc.value }} />
+                <span>{lc.name.split(' ')[1]}</span>
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Tło tablicy */}
@@ -157,7 +282,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
-        {/* Sekcja Eksportu */}
+        {/* Eksport */}
         <div style={{ marginBottom: 22 }}>
           <label style={{ fontSize: 13, fontWeight: 600, color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
             <Download size={16} color="#38bdf8" /> Eksportuj rysunek
@@ -252,7 +377,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <span>Instalacja jako aplikacja (Android / iOS / HyperOS)</span>
           </div>
           <div>
-            Możesz zainstalować aplikację na ekranie telefonu:
+            Możesz zainstalować aplikację na ekranie telefonu / tabletu:
             <ul style={{ marginLeft: 18, marginTop: 4 }}>
               <li><strong>Android & HyperOS:</strong> Menu przeglądarki (3 kropki) → "Zainstaluj aplikację" lub "Dodaj do ekranu głównego".</li>
               <li><strong>iOS (iPhone/iPad Safari):</strong> Ikona Udostępnij → "Do ekranu początkowego".</li>

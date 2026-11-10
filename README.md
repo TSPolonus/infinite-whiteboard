@@ -44,4 +44,61 @@ Nowoczesna aplikacja do rysowania z **nieskończoną przestrzenią roboczą (inf
 
 ---
 
+## 🚀 Jak uruchomić projekt lokalnie
 
+1. Upewnij się, że masz zainstalowany [Node.js](https://nodejs.org/).
+2. Otwórz folder w terminalu i wpisz:
+   ```bash
+   npm install
+   npm run dev
+   ```
+3. Otwórz w przeglądarce wyświetlony adres (np. `http://localhost:5173`).
+
+---
+
+## 📤 Jak wstawić projekt na GitHub
+
+### Sposób 1: Najprostszy — GitHub Desktop (zalecany dla początkujących)
+1. Pobierz darmowy program [GitHub Desktop](https://desktop.github.com/) i zaloguj się swoim kontem GitHub.
+2. W GitHub Desktop kliknij: **File** → **Add local repository...**
+3. Wybierz folder: `c:\Users\adiku\Desktop\Aplikacja do rysowania`.
+4. Jeśli pojawi się komunikat *"This directory does not appear to be a Git repository"*, kliknij **"create a repository"**.
+5. Wpisz nazwę repozytorium (np. `infinity-draw`) i kliknij **Create Repository**.
+6. Kliknij niebieski przycisk u góry: **Publish repository** (możesz odznaczyć *"Keep this code private"*, jeśli chcesz publiczne repozytorium).
+7. Gotowe! Projekt jest na Twoim GitHubie.
+
+---
+
+### Sposób 2: Przez przeglądarkę (bez instalowania programów)
+1. Wejdź na [GitHub.com](https://github.com/) i utwórz nowe repozytorium (przycisk **New**).
+2. Nadaj nazwę, np. `infinity-draw`, i kliknij **Create repository**.
+3. Na stronie nowego repozytorium kliknij link **"uploading an existing file"**.
+4. Zaznacz wszystkie pliki z folderu aplikacji (oprócz folderu `node_modules` i `dist`) i przeciągnij je do okna przeglądarki.
+5. Kliknij zielony przycisk **Commit changes**.
+
+---
+
+### Sposób 3: Przez wiersz poleceń (Git CLI)
+1. Zainstaluj [Git for Windows](https://git-scm.com/download/win).
+2. W terminalu w folderze projektu wpisz:
+   ```bash
+   git init
+   git add .
+   git commit -m "Pierwszy commit - InfinityDraw"
+   git branch -M main
+   git remote add origin https://github.com/TWOJA_NAZWA_UZYTKOWNIKA/NAZWA_REPOZYTORIUM.git
+   git push -u origin main
+   ```
+
+---
+
+## 🌐 Jak włączyć darmową stronę online (GitHub Pages)
+
+W projekcie przygotowano już plik automatycznego wdrożenia (`.github/workflows/deploy.yml`):
+1. Wejdź w swoje repozytorium na GitHubie.
+2. Przejdź do zakładki **Settings** → **Pages** (w menu po lewej stronie).
+3. W sekcji **Build and deployment** w polu **Source** zmień z *"Deploy from a branch"* na **GitHub Actions**.
+4. Przejdź do zakładki **Actions** u góry i upewnij się, że workflow *Deploy InfinityDraw to GitHub Pages* zakończył się sukcesem.
+5. Twoja aplikacja będzie dostępna pod adresem:
+   `https://TWOJA_NAZWA_UZYTKOWNIKA.github.io/NAZWA_REPOZYTORIUM/`
+6. Ten link możesz wysłać znajomym lub otworzyć na telefonie z Androidem, iOS i HyperOS!
