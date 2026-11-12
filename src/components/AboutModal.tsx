@@ -144,7 +144,7 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose }) => {
                   borderRadius: 6,
                 }}
               >
-                v2.5.7
+                v2.5.8
               </span>
             </div>
             <p style={{ margin: 0, color: '#cbd5e1' }}>

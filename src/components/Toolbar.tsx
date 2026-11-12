@@ -389,7 +389,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       </header>
 
       {/* Floating Selection Controls */}
-      {selectedElementId && (
+      {selectedElementId && currentTool === 'select' && (
         <div
           className="glass-panel"
           style={{

@@ -773,7 +773,7 @@ export const App: React.FC = () => {
       drawLaserTrails(ctx, laserTrailsRef.current, now);
 
       // 5. Selection box & handles for all selected elements
-      if (selectedElementIds.length > 0) {
+      if (selectedElementIds.length > 0 && currentTool === 'select') {
         const selectedElements = elements.filter((e) => selectedElementIds.includes(e.id));
         if (selectedElements.length > 0) {
           drawSelectionBox(ctx, selectedElements, transform);
@@ -933,15 +933,15 @@ export const App: React.FC = () => {
       return;
     }
 
-    // 4. SELECT TOOL:
-    // User request: "Niech ogólnie jak jest włączony tryb zaznaczenia na tablecie to niech tylko palec reaguje na to co się dzieje bez użycia rysika"
-    if (currentTool === 'select') {
-      if (e.pointerType === 'pen') {
-        // Stylus is ignored in select mode on tablets!
-        return;
-      }
+    // Auto-odznaczenie obiektów przy przełączeniu na narzędzia rysowania
+    if (currentTool !== 'select' && selectedElementIds.length > 0) {
+      setSelectedElementIds([]);
+      setActiveResizeHandle(null);
+    }
 
-      // Check handle on currently selected elements
+    // 4. SELECT TOOL:
+    if (currentTool === 'select') {
+      // Check handle on currently selected elements (skalowanie / obrót)
       const selectedElements = elements.filter((el) => selectedElementIds.includes(el.id));
       if (selectedElements.length > 0) {
         const handle = getHandleAtPoint(worldPos, selectedElements, transform);
@@ -964,7 +964,7 @@ export const App: React.FC = () => {
 
       // Check hit on existing elements
       const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
-      if (hit) {
+      if (hit && (selectedElementIds.includes(hit.id) || selectedElementIds.length === 0)) {
         // Oblicz nową listę zaznaczonych ID lokalnie — NIE czekaj na setState (React batch!)
         const newSelectedIds = selectedElementIds.includes(hit.id) ? selectedElementIds : [hit.id];
         if (!selectedElementIds.includes(hit.id)) {
@@ -974,7 +974,6 @@ export const App: React.FC = () => {
 
         const initPosMap = new Map<string, Point>();
         const strokePtsMap = new Map<string, Point[]>();
-        // Używamy localnych newSelectedIds — zawsze aktualne, nie czeka na React re-render
         for (const id of newSelectedIds) {
           const el = elements.find((item) => item.id === id);
           if (el) {
@@ -990,11 +989,15 @@ export const App: React.FC = () => {
           .filter((item) => newSelectedIds.includes(item.id))
           .map((el) => JSON.parse(JSON.stringify(el)));
       } else {
-        // Clicked on empty canvas: Start Marquee Area Selection!
+        // Kliknięto obok obrazka (na puste pole lub inny obiekt) -> odznacz i natychmiast przeskocz na pędzel!
         setSelectedElementIds([]);
         setActiveResizeHandle(null);
-        setIsMarqueeSelecting(true);
-        setMarqueeBox({ start: worldPos, current: worldPos });
+        setIsMarqueeSelecting(false);
+        setMarqueeBox(null);
+        setCurrentTool('pen');
+        // Natychmiast rozpocznij rysowanie pędzlem
+        setIsDrawing(true);
+        setCurrentStroke([worldPos]);
       }
       return;
     }
@@ -1007,6 +1010,7 @@ export const App: React.FC = () => {
 
     // 6. Eraser Tool: object vs brush erase
     if (currentTool === 'eraser') {
+      setIsDrawing(true);
       if (toolSettings.eraser.mode === 'stroke') {
         deletedInGestureRef.current = [];
         const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
@@ -1018,7 +1022,6 @@ export const App: React.FC = () => {
         }
       } else {
         // Pędzel wycierający: płynny pędzel w kolorze tła
-        setIsDrawing(true);
         setCurrentStroke([worldPos]);
       }
       return;
@@ -1594,29 +1597,11 @@ export const App: React.FC = () => {
       }
     }
 
-    if (!isDrawing) return;
-    setIsDrawing(false);
-
-    const { worldPos } = getCanvasPoint(e);
-    networkManagerRef.current?.broadcast({
-      type: 'cursor_move',
-      cursor: {
-        userId: networkManagerRef.current?.getUserId() || 'me',
-        userName: 'Użytkownik',
-        color: toolSettings.pen.color,
-        x: Math.round(worldPos.x),
-        y: Math.round(worldPos.y),
-        lastActive: Date.now(),
-        isDrawing: false,
-      },
-    });
-
-    if (currentTool === 'eraser') {
-      if (toolSettings.eraser.mode === 'stroke') {
-        if (deletedInGestureRef.current.length > 0) {
-          pushUndoAction({ type: 'delete', elements: [...deletedInGestureRef.current] });
-          deletedInGestureRef.current = [];
-        }
+    // Obsługa zakończenia gumkowania (zarówno gumka całych linii jak i pędzel)
+    if (currentTool === 'eraser' || deletedInGestureRef.current.length > 0) {
+      if (deletedInGestureRef.current.length > 0) {
+        pushUndoAction({ type: 'delete', elements: [...deletedInGestureRef.current] });
+        deletedInGestureRef.current = [];
       } else if (currentStroke.length > 0) {
         const myId = networkManagerRef.current?.getUserId() || 'me';
         const eraserStroke: StrokeElement = {
@@ -1636,8 +1621,26 @@ export const App: React.FC = () => {
         networkManagerRef.current?.broadcast({ type: 'element_add', element: eraserStroke });
       }
       setCurrentStroke([]);
+      setIsDrawing(false);
       return;
     }
+
+    if (!isDrawing) return;
+    setIsDrawing(false);
+
+    const { worldPos } = getCanvasPoint(e);
+    networkManagerRef.current?.broadcast({
+      type: 'cursor_move',
+      cursor: {
+        userId: networkManagerRef.current?.getUserId() || 'me',
+        userName: 'Użytkownik',
+        color: toolSettings.pen.color,
+        x: Math.round(worldPos.x),
+        y: Math.round(worldPos.y),
+        lastActive: Date.now(),
+        isDrawing: false,
+      },
+    });
 
     // Zakończenie pociągnięcia lasera i wypchnięcie ostatniej paczki punktów
     if (pendingLaserBatchRef.current.length > 0) {
@@ -2063,6 +2066,7 @@ export const App: React.FC = () => {
       // 2. Dodaj element do tablicy lokalnie
       pushToHistory([...elementsRef.current.filter((e) => e.id !== imgElement.id), imgElement]);
       setSelectedElementIds([imgElement.id]);
+      setCurrentTool('select');
 
       // 3. Upewnij się, że połączenie WebRTC jest aktywne i natychmiast rozgłoś do lobby
       networkManagerRef.current?.ensureConnection(boardSettings.roomCode);
@@ -2286,10 +2290,14 @@ export const App: React.FC = () => {
         canRedo={undoRevision >= 0 && redoStackRef.current.length > 0}
         boardSettings={boardSettings}
         connectedCount={connectedCount}
-        selectedElementId={selectedElementIds.length > 0 ? selectedElementIds[0] : null}
-        selectedElement={selectedElementIds.length === 1 ? elements.find((e) => e.id === selectedElementIds[0]) || null : null}
+        selectedElementId={currentTool === 'select' && selectedElementIds.length > 0 ? selectedElementIds[0] : null}
+        selectedElement={currentTool === 'select' && selectedElementIds.length === 1 ? elements.find((e) => e.id === selectedElementIds[0]) || null : null}
         onToolChange={(tool) => {
           if (snappedShape) finalizeCurrentSnappedShape();
+          if (tool !== 'select') {
+            setSelectedElementIds([]);
+            setActiveResizeHandle(null);
+          }
           setCurrentTool(tool);
         }}
         onShapeChange={setCurrentShape}
