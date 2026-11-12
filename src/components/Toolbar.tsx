@@ -25,6 +25,7 @@ import {
   Share2,
   Settings,
   Trash2,
+  Info,
   Lock,
   Globe,
   Wand2,
@@ -62,6 +63,7 @@ interface ToolbarProps {
   onClearCanvas: () => void;
   onOpenShareModal: () => void;
   onOpenSettingsModal: () => void;
+  onOpenAboutModal: () => void;
   onDuplicateSelected: () => void;
   onRotateSelected: () => void;
   onDeleteSelected: () => void;
@@ -147,6 +149,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onClearCanvas,
   onOpenShareModal,
   onOpenSettingsModal,
+  onOpenAboutModal,
   onDuplicateSelected,
   onRotateSelected,
   onDeleteSelected,
@@ -363,6 +366,15 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             style={{ padding: 6 }}
           >
             <Settings size={17} />
+          </button>
+
+          <button
+            className="glass-btn"
+            onClick={onOpenAboutModal}
+            title="O aplikacji i licencja (Informacje)"
+            style={{ padding: 6, color: '#38bdf8' }}
+          >
+            <Info size={17} />
           </button>
 
           <button

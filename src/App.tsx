@@ -41,6 +41,7 @@ import { ShareModal } from './components/ShareModal';
 import { SettingsModal } from './components/SettingsModal';
 import { PasswordPromptModal } from './components/PasswordPromptModal';
 import { OffscreenIndicators } from './components/OffscreenIndicators';
+import { AboutModal } from './components/AboutModal';
 
 export const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -170,6 +171,7 @@ export const App: React.FC = () => {
   // Modals
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isAboutModalOpen, setIsAboutModalOpen] = useState(false);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [passwordErrorMessage, setPasswordErrorMessage] = useState<string>('');
 
@@ -2285,6 +2287,7 @@ export const App: React.FC = () => {
         onClearCanvas={handleClearCanvas}
         onOpenShareModal={() => setIsShareModalOpen(true)}
         onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
+        onOpenAboutModal={() => setIsAboutModalOpen(true)}
         onDuplicateSelected={handleDuplicateSelected}
         onRotateSelected={handleRotateSelected}
         onDeleteSelected={handleDeleteSelected}
@@ -2336,6 +2339,11 @@ export const App: React.FC = () => {
         onExportSVG={handleExportSVG}
         onExportJSON={handleExportJSON}
         onImportJSON={handleImportJSON}
+      />
+
+      <AboutModal
+        isOpen={isAboutModalOpen}
+        onClose={() => setIsAboutModalOpen(false)}
       />
 
       <PasswordPromptModal
