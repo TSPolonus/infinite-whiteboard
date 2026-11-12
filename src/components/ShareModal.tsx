@@ -249,10 +249,10 @@ export const ShareModal: React.FC<ShareModalProps> = ({
           >
             <div>
               <div style={{ fontSize: 13, fontWeight: 700, color: '#facc15', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <RefreshCw size={14} /> Odświeżenie obrazów (Host)
+                <RefreshCw size={14} /> Odświeżenie tablicy (Host)
               </div>
               <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2, lineHeight: 1.35 }}>
-                W razie błędu wyświetlania zdjęcia u innego użytkownika, kliknij ten przycisk, aby wymusić ponowne załadowanie u wszystkich.
+                W razie błędu, rozsynchronizowania lub niewidocznych linii/obrazków, kliknij ten przycisk, aby zsynchronizować i odświeżyć całą tablicę u wszystkich uczestników.
               </div>
             </div>
             <button
@@ -270,7 +270,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
                 flexShrink: 0,
               }}
             >
-              Odśwież u wszystkich
+              Odśwież wszystko
             </button>
           </div>
         )}

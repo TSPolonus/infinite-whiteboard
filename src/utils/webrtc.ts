@@ -38,6 +38,7 @@ export interface NetworkCallbacks {
   onPasswordError: (msg: string) => void;
   onConnectionStatusChange: (status: 'disconnected' | 'connecting' | 'connected' | 'host') => void;
   onForceRefreshImages?: () => void;
+  onForceRefreshAll?: (elements: CanvasElement[], settings: BoardSettings) => void;
   onNetworkError?: () => void;
 }
 
@@ -343,6 +344,10 @@ export class BoardNetworkManager {
 
       case 'force_refresh_images':
         this.callbacks.onForceRefreshImages?.();
+        break;
+
+      case 'force_refresh_all':
+        this.callbacks.onForceRefreshAll?.(msg.elements, msg.settings);
         break;
 
       case 'ping':

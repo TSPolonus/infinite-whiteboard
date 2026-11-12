@@ -105,18 +105,24 @@ export function drawGrid(
 
 export function drawStroke(
   ctx: CanvasRenderingContext2D,
-  stroke: StrokeElement
+  stroke: StrokeElement,
+  currentBgColor?: string
 ) {
   if (stroke.points.length === 0) return;
 
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  ctx.strokeStyle = stroke.color;
+
+  const effectiveColor = stroke.tool === 'eraser' ? (currentBgColor || stroke.color || '#ffffff') : stroke.color;
+  ctx.strokeStyle = effectiveColor;
 
   if (stroke.tool === 'highlighter') {
     ctx.globalAlpha = stroke.opacity || 0.40;
     ctx.lineWidth = stroke.size * 1.6;
+  } else if (stroke.tool === 'eraser') {
+    ctx.globalAlpha = 1.0;
+    ctx.lineWidth = stroke.size;
   } else {
     ctx.globalAlpha = stroke.opacity || 1.0;
     ctx.lineWidth = stroke.size;
@@ -126,7 +132,7 @@ export function drawStroke(
   if (points.length === 1) {
     ctx.beginPath();
     ctx.arc(points[0].x, points[0].y, ctx.lineWidth / 2, 0, Math.PI * 2);
-    ctx.fillStyle = stroke.color;
+    ctx.fillStyle = effectiveColor;
     ctx.fill();
     ctx.restore();
     return;

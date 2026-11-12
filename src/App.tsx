@@ -28,7 +28,6 @@ import {
   getCombinedBBox,
   getHandleAtPoint,
   getShapeVertices,
-  eraseStrokePixels,
   clearPixelCache,
   drawSnappedShapeEditHandles,
   getSnappedShapeVertexAtPoint,
@@ -144,9 +143,9 @@ export const App: React.FC = () => {
   const pendingLaserBatchRef = useRef<LaserPoint[]>([]);
   const laserBatchTimerRef = useRef<number | null>(null);
 
-  // User-scoped collaborative Undo & Redo działające na WSZYSTKIE akcje (rysowanie, kształty, ruch, rozmiar, obrót, usuwanie, warstwy, czyszczenie)
+  // User-scoped collaborative Undo & Redo działające na WSZYSTKIE akcje (rysowanie, kształty, gumka, ruch, rozmiar, obrót, usuwanie, warstwy, czyszczenie)
   type HistoryAction =
-    | { type: 'add'; element: CanvasElement }
+    | { type: 'add'; elements: CanvasElement[] }
     | { type: 'delete'; elements: CanvasElement[] }
     | { type: 'modify'; before: CanvasElement[]; after: CanvasElement[] }
     | { type: 'clear'; previousElements: CanvasElement[] };
@@ -155,6 +154,7 @@ export const App: React.FC = () => {
   const redoStackRef = useRef<HistoryAction[]>([]);
   const draggedInitialElementsRef = useRef<CanvasElement[]>([]);
   const resizedInitialElementsRef = useRef<CanvasElement[]>([]);
+  const deletedInGestureRef = useRef<CanvasElement[]>([]);
 
   // Interaktywna modyfikacja dopasowanego kształtu podczas trzymania rysowania (styl Starnote)
   const isAdjustingSnappedShapeRef = useRef<boolean>(false);
@@ -193,7 +193,7 @@ export const App: React.FC = () => {
 
   // Rejestracja elementu stworzonego przez bieżącego użytkownika
   const registerMyCreatedElement = useCallback((element: CanvasElement) => {
-    pushUndoAction({ type: 'add', element });
+    pushUndoAction({ type: 'add', elements: [element] });
   }, [pushUndoAction]);
 
   // History push helper (synchronous ref update prevents missing consecutive strokes)
@@ -237,7 +237,7 @@ export const App: React.FC = () => {
         elementsRef.current = updated;
         setElements(updated);
         networkManagerRef.current?.broadcast({ type: 'element_delete', id: last.id });
-        redoStackRef.current.push({ type: 'add', element: last });
+        redoStackRef.current.push({ type: 'add', elements: [last] });
         setUndoRevision((r) => r + 1);
         showToastRef.current('↩️ Cofnięto narysowanie');
       }
@@ -249,12 +249,15 @@ export const App: React.FC = () => {
 
     switch (action.type) {
       case 'add': {
-        const targetId = action.element.id;
-        const updated = elementsRef.current.filter((e) => e.id !== targetId);
+        const targetIds = new Set(action.elements.map((e) => e.id));
+        const updated = elementsRef.current.filter((e) => !targetIds.has(e.id));
         elementsRef.current = updated;
         setElements(updated);
-        networkManagerRef.current?.broadcast({ type: 'element_delete', id: targetId });
-        showToastRef.current('↩️ Cofnięto narysowanie');
+        for (const el of action.elements) {
+          networkManagerRef.current?.broadcast({ type: 'element_delete', id: el.id });
+        }
+        const hasEraser = action.elements.some((e) => e.type === 'stroke' && e.tool === 'eraser');
+        showToastRef.current(hasEraser ? '↩️ Cofnięto zmazanie' : '↩️ Cofnięto narysowanie');
         break;
       }
       case 'delete': {
@@ -265,7 +268,7 @@ export const App: React.FC = () => {
         for (const el of action.elements) {
           networkManagerRef.current?.broadcast({ type: 'element_add', element: el });
         }
-        showToastRef.current('↩️ Przywrócono usunięty element');
+        showToastRef.current('↩️ Przywrócono zmazane / usunięte elementy');
         break;
       }
       case 'modify': {
@@ -304,11 +307,15 @@ export const App: React.FC = () => {
 
     switch (action.type) {
       case 'add': {
-        const updated = [...elementsRef.current.filter((e) => e.id !== action.element.id), action.element];
+        const addedIds = new Set(action.elements.map((e) => e.id));
+        const updated = [...elementsRef.current.filter((e) => !addedIds.has(e.id)), ...action.elements];
         elementsRef.current = updated;
         setElements(updated);
-        networkManagerRef.current?.broadcast({ type: 'element_add', element: action.element });
-        showToastRef.current('↪️ Ponowiono narysowanie');
+        for (const el of action.elements) {
+          networkManagerRef.current?.broadcast({ type: 'element_add', element: el });
+        }
+        const hasEraser = action.elements.some((e) => e.type === 'stroke' && e.tool === 'eraser');
+        showToastRef.current(hasEraser ? '↪️ Ponowiono zmazanie' : '↪️ Ponowiono narysowanie');
         break;
       }
       case 'delete': {
@@ -425,7 +432,15 @@ export const App: React.FC = () => {
         onForceRefreshImages: () => {
           imageCacheRef.current.clear();
           clearPixelCache();
-          showToastRef.current('🔄 Host odświeżył obrazki na tablicy.');
+          showToastRef.current('🔄 Host odświeżył całą tablicę.');
+        },
+        onForceRefreshAll: (syncElements, syncSettings) => {
+          imageCacheRef.current.clear();
+          clearPixelCache();
+          elementsRef.current = syncElements;
+          setElements(syncElements);
+          if (syncSettings) setBoardSettings(syncSettings);
+          showToastRef.current('🔄 Host zsynchronizował i odświeżył całą tablicę u wszystkich.');
         },
         onLaserStroke: (points) => {
           laserTrailsRef.current.push(...points);
@@ -673,7 +688,7 @@ export const App: React.FC = () => {
       // 1. Existing Elements
       for (const el of elements) {
         if (el.type === 'stroke') {
-          drawStroke(ctx, el);
+          drawStroke(ctx, el, boardSettings.backgroundColor);
         } else if (el.type === 'shape') {
           drawShape(ctx, el);
         } else if (el.type === 'image') {
@@ -718,17 +733,32 @@ export const App: React.FC = () => {
           };
           drawStroke(ctx, tempStroke);
         } else if (currentTool === 'eraser' && toolSettings.eraser.mode === 'brush') {
+          // Płynny podgląd pędzla wycierającego w trakcie przeciągania
+          const tempEraserStroke: StrokeElement = {
+            id: 'temp_eraser',
+            type: 'stroke',
+            tool: 'eraser',
+            points: currentStroke,
+            color: boardSettings.backgroundColor,
+            size: toolSettings.eraser.size * 2,
+            opacity: 1,
+            timestamp: now,
+          };
+          drawStroke(ctx, tempEraserStroke, boardSettings.backgroundColor);
+
           const lastP = currentStroke[currentStroke.length - 1];
-          ctx.save();
-          ctx.beginPath();
-          ctx.arc(lastP.x, lastP.y, toolSettings.eraser.size, 0, Math.PI * 2);
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 1.5 / transform.scale;
-          ctx.setLineDash([3 / transform.scale, 3 / transform.scale]);
-          ctx.stroke();
-          ctx.fillStyle = 'rgba(56, 189, 248, 0.15)';
-          ctx.fill();
-          ctx.restore();
+          if (lastP) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(lastP.x, lastP.y, toolSettings.eraser.size, 0, Math.PI * 2);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1.5 / transform.scale;
+            ctx.setLineDash([3 / transform.scale, 3 / transform.scale]);
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.12)';
+            ctx.fill();
+            ctx.restore();
+          }
         }
       }
 
@@ -978,18 +1008,18 @@ export const App: React.FC = () => {
     // 6. Eraser Tool: object vs brush erase
     if (currentTool === 'eraser') {
       if (toolSettings.eraser.mode === 'stroke') {
+        deletedInGestureRef.current = [];
         const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
         if (hit) {
-          pushUndoAction({ type: 'delete', elements: [hit] });
-          const next = elements.filter((el) => el.id !== hit.id);
+          deletedInGestureRef.current.push(hit);
+          const next = elementsRef.current.filter((el) => el.id !== hit.id);
           pushToHistory(next);
           networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
         }
       } else {
-        draggedInitialElementsRef.current = elements.map((el) => JSON.parse(JSON.stringify(el)));
+        // Pędzel wycierający: płynny pędzel w kolorze tła
         setIsDrawing(true);
         setCurrentStroke([worldPos]);
-        applyPixelEraser(worldPos);
       }
       return;
     }
@@ -1264,18 +1294,19 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Eraser on drag (Brush Mode)
+    // Eraser on drag (Brush Mode vs Stroke Mode)
     if (currentTool === 'eraser' && (e.buttons === 1 || e.pointerType === 'pen' || isDrawing)) {
       if (toolSettings.eraser.mode === 'stroke') {
-        const hit = elements.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
-        if (hit) {
-          const next = elements.filter((el) => el.id !== hit.id);
+        const hit = elementsRef.current.slice().reverse().find((el) => isPointInsideElement(worldPos, el));
+        if (hit && !deletedInGestureRef.current.some((d) => d.id === hit.id)) {
+          deletedInGestureRef.current.push(hit);
+          const next = elementsRef.current.filter((el) => el.id !== hit.id);
           pushToHistory(next);
           networkManagerRef.current?.broadcast({ type: 'element_delete', id: hit.id });
         }
       } else {
+        // Pędzel wycierający: zbieramy punkty płynnie jak w białym pędzlu
         setCurrentStroke((prev) => [...prev, worldPos]);
-        applyPixelEraser(worldPos);
       }
       return;
     }
@@ -1455,35 +1486,6 @@ export const App: React.FC = () => {
     }
   };
 
-  // Brush Eraser logic
-  const applyPixelEraser = (erasePoint: Point) => {
-    const eraserRadius = toolSettings.eraser.size;
-    let changed = false;
-    let nextElements: CanvasElement[] = [];
-
-    for (const el of elements) {
-      if (el.type === 'stroke') {
-        const result = eraseStrokePixels(el, erasePoint, eraserRadius);
-        if (result.length !== 1 || result[0].points.length !== el.points.length) {
-          changed = true;
-          nextElements.push(...result);
-        } else {
-          nextElements.push(el);
-        }
-      } else {
-        if (isPointInsideElement(erasePoint, el)) {
-          changed = true;
-        } else {
-          nextElements.push(el);
-        }
-      }
-    }
-
-    if (changed) {
-      setElements(nextElements);
-    }
-  };
-
   // Pointer Up Handler
   const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     try {
@@ -1610,13 +1612,30 @@ export const App: React.FC = () => {
     });
 
     if (currentTool === 'eraser') {
+      if (toolSettings.eraser.mode === 'stroke') {
+        if (deletedInGestureRef.current.length > 0) {
+          pushUndoAction({ type: 'delete', elements: [...deletedInGestureRef.current] });
+          deletedInGestureRef.current = [];
+        }
+      } else if (currentStroke.length > 0) {
+        const myId = networkManagerRef.current?.getUserId() || 'me';
+        const eraserStroke: StrokeElement = {
+          id: 'eraser_' + Math.random().toString(36).substring(2, 9),
+          type: 'stroke',
+          tool: 'eraser',
+          points: currentStroke,
+          color: boardSettings.backgroundColor,
+          size: toolSettings.eraser.size * 2,
+          opacity: 1,
+          timestamp: Date.now(),
+          userId: myId,
+        };
+        registerMyCreatedElement(eraserStroke);
+        const next = [...elementsRef.current, eraserStroke];
+        pushToHistory(next);
+        networkManagerRef.current?.broadcast({ type: 'element_add', element: eraserStroke });
+      }
       setCurrentStroke([]);
-      pushToHistory(elements);
-      networkManagerRef.current?.broadcast({
-        type: 'board_sync',
-        elements: elements,
-        settings: boardSettings,
-      });
       return;
     }
 
@@ -1770,19 +1789,24 @@ export const App: React.FC = () => {
     showToastRef.current('🎯 Powrót na środek tablicy (0, 0)');
   };
 
-  // Opcja dla Hosta: Wymuszenie odświeżenia i ponownego załadowania obrazów u wszystkich
+  // Opcja dla Hosta: Pełne odświeżenie i zsynchronizowanie całej tablicy dla wszystkich
   const handleHostForceRefresh = () => {
     imageCacheRef.current.clear();
     clearPixelCache();
     if (networkManagerRef.current) {
       networkManagerRef.current.broadcast({ type: 'force_refresh_images' });
       networkManagerRef.current.broadcast({
+        type: 'force_refresh_all',
+        elements: elementsRef.current,
+        settings: boardSettingsRef.current,
+      });
+      networkManagerRef.current.broadcast({
         type: 'board_sync',
         elements: elementsRef.current,
-        settings: boardSettings,
+        settings: boardSettingsRef.current,
       });
     }
-    showToastRef.current('🔄 Wymuszono odświeżenie obrazków u wszystkich uczestników!');
+    showToastRef.current('🔄 Wymuszono pełne odświeżenie i zsynchronizowanie tablicy u wszystkich!');
   };
 
   // Transformation actions on all selected elements
@@ -1824,9 +1848,7 @@ export const App: React.FC = () => {
     }
 
     if (clonedList.length === 0) return;
-    for (const clone of clonedList) {
-      pushUndoAction({ type: 'add', element: clone });
-    }
+    pushUndoAction({ type: 'add', elements: clonedList });
     pushToHistory([...elements, ...clonedList]);
     setSelectedElementIds(clonedList.map((c) => c.id));
     for (const clone of clonedList) {
@@ -2085,7 +2107,8 @@ export const App: React.FC = () => {
     for (const el of elements) {
       if (el.type === 'stroke') {
         const d = el.points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
-        svgContent += `<path d="${d}" fill="none" stroke="${el.color}" stroke-width="${el.size}" stroke-linecap="round" stroke-linejoin="round" opacity="${el.opacity || 1}" />\n`;
+        const strokeColor = el.tool === 'eraser' ? boardSettings.backgroundColor : el.color;
+        svgContent += `<path d="${d}" fill="none" stroke="${strokeColor}" stroke-width="${el.size}" stroke-linecap="round" stroke-linejoin="round" opacity="${el.opacity || 1}" />\n`;
       } else if (el.type === 'shape') {
         if (el.shapeType === 'rectangle') {
           svgContent += `<rect x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" fill="none" stroke="${el.color}" stroke-width="${el.strokeWidth}" />\n`;

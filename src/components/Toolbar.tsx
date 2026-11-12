@@ -321,12 +321,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             <span className="hidden-mobile">Środek</span>
           </button>
 
-          {/* Opcja dla Hosta: Wymuszenie odświeżenia obrazków u wszystkich */}
+          {/* Opcja dla Hosta: Wymuszenie pełnego odświeżenia całej tablicy dla wszystkich */}
           {isHost && onHostForceRefresh && (
             <button
               className="glass-btn"
               onClick={onHostForceRefresh}
-              title="Wymuś odświeżenie i zsynchronizowanie obrazków u wszystkich użytkowników (Host)"
+              title="Odśwież całą tablicę u wszystkich uczestników (Host)"
               style={{
                 padding: '6px 10px',
                 gap: 5,
@@ -338,7 +338,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               }}
             >
               <RefreshCw size={14} />
-              <span className="hidden-mobile">Odśwież obrazki</span>
+              <span className="hidden-mobile">Odśwież wszystko</span>
             </button>
           )}
 

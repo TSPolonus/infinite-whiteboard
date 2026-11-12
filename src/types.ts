@@ -29,7 +29,7 @@ export interface Point {
 export interface StrokeElement {
   id: string;
   type: 'stroke';
-  tool: 'pen' | 'highlighter';
+  tool: 'pen' | 'highlighter' | 'eraser';
   points: Point[];
   color: string;
   size: number;
@@ -134,4 +134,5 @@ export type NetworkMessage =
   | { type: 'laser_stroke'; points: LaserPoint[] }
   | { type: 'cursor_move'; cursor: RemoteCursor }
   | { type: 'force_refresh_images' }
+  | { type: 'force_refresh_all'; elements: CanvasElement[]; settings: BoardSettings }
   | { type: 'board_settings_update'; settings: Partial<BoardSettings> };
